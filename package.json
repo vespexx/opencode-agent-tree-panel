@@ -1,0 +1,47 @@
+{
+  "name": "opencode-agent-tree-panel",
+  "version": "0.1.0",
+  "description": "Right-sidebar panel showing the agent/sub-agent tree with models, tokens, cost, and current step's tool calls",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.0",
+    "@opentui/core": "^0.6.8",
+    "@opentui/solid": "^0.6.8",
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.1.0",
+    "@opentui/core": "^0.6.8",
+    "@opentui/solid": "^0.6.8",
+    "solid-js": "^1.8.0",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "tui",
+    "sidebar",
+    "agent",
+    "subagent",
+    "model",
+    "tree"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/book16/opencode-agent-tree-panel.git"
+  },
+  "author": "book16",
+  "bugs": {
+    "url": "https://github.com/book16/opencode-agent-tree-panel/issues"
+  }
+}
