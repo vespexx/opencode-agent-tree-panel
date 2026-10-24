@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { RGBA } from "@opentui/core"
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import {
   getLiteLLMData,
   lookupAlias,
@@ -23,7 +23,8 @@ import {
   type ModelValue,
   type TranscriptMessage,
 } from "./models"
-import { fmtDuration, fmtSpend, fmtTokens, rateLine, spendOf, sumSpend } from "./format"
+import { fmtDuration, fmtSpend, fmtTokens, rateLine, runDuration, spendOf, sumSpend } from "./format"
+import { liveStatus, statusGlyph } from "./liveness"
 import { readServed, servedSummary, type ServedRecord } from "./served"
 
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
@@ -96,13 +97,20 @@ const ATTR_DIM = 2
 const ATTR_ITALIC = 3
 const ATTR_UNDERLINE = 4
 
-/** Status dot: filled while the session is running. */
-function StatusDot(props: { running: boolean }) {
+/**
+ * Status dot: the glyph is filled while the session is running, an x marks a failed last run.
+ */
+function StatusDot(props: { running: boolean; outcome?: "succeeded" | "failed" | "interrupted" }) {
   const ctx = usePlugin()
-  const color = props.running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base
+  const glyph = statusGlyph(props.running, props.outcome)
+  const color = props.running
+    ? ctx.theme.text.feedback.success.base
+    : glyph === "✗"
+      ? ctx.theme.text.feedback.error.base
+      : ctx.theme.text.feedback.info.base
   return (
     <text fg={color} selectable={false} flexShrink={0}>
-      {props.running ? "●" : "○"}
+      {glyph}
     </text>
   )
 }
@@ -156,12 +164,6 @@ function totalTokens(tokens: SessionInfo["tokens"]): number {
   return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
 }
 
-/** Elapsed time since session creation (or last update if running). */
-function elapsed(session: SessionInfo, status: "idle" | "running"): number {
-  const end = status === "running" ? session.time.updated : (session.time.idle ?? session.time.updated)
-  return Math.max(0, end - session.time.created)
-}
-
 /** Running entries first, then the most recently touched ones. */
 function sortByActivity(nodes: AgentNode[], statuses: Map<string, "idle" | "running">): AgentNode[] {
   return [...nodes].sort((a, b) => {
@@ -201,7 +203,7 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
     bucket.group.count += 1
     bucket.group.tokens += totalTokens(session.tokens)
     bucket.group.cost += session.cost
-    bucket.group.duration += elapsed(session, "idle")
+    bucket.group.duration += runDuration(session.time, false)
     bucket.group.updated = Math.max(bucket.group.updated, session.time.updated)
     // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
     const modelID = modelKey(session.model)
@@ -219,7 +221,7 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
       use.tokens += totalTokens(session.tokens)
       mergeUsage(use.usage, usageOf(session.tokens))
       use.cost += session.cost
-      use.duration += elapsed(session, "idle")
+      use.duration += runDuration(session.time, false)
       use.lastUsed = Math.max(use.lastUsed, session.time.updated)
       bucket.models.set(modelID, use)
     }
@@ -363,12 +365,32 @@ function AgentsSection(props: { sessionID: string; tick: number; llm: LiteLLMDat
     return buildTree(ids, get)
   })
 
-  // Status per session (for live "running" indicator)
+  // Status per session (for live "running" indicator).
+  // The event flag alone is not trustworthy (see liveness.ts) and refresh() keeps the whole family's records current,
+  // so the two are reconciled here.
   const statuses = createMemo(() => {
     props.tick
-    const ids = ctx.data.session.family(props.sessionID)
     const map = new Map<string, "idle" | "running">()
-    for (const id of ids) {
+    // The tree holds the family nested, so it is walked down: every session needs a status, not only the roots.
+    const visit = (nodes: AgentNode[]) => {
+      for (const node of nodes) {
+        const session = node.session
+        map.set(
+          session.id,
+          liveStatus({
+            reported: ctx.data.session.status(session.id),
+            idle: session.time?.idle,
+            updated: session.time?.updated ?? 0,
+            tokens: totalTokens(session.tokens),
+          }),
+        )
+        if (node.children.length > 0) visit(node.children)
+      }
+    }
+    visit(family())
+    // A session announced but not in the tree yet (its record is not cached) keeps the event flag as it stands.
+    for (const id of ctx.data.session.family(props.sessionID)) {
+      if (map.has(id)) continue
       map.set(id, ctx.data.session.status(id))
     }
     return map
@@ -414,7 +436,7 @@ function AgentTreeNode(props: {
   const status = statuses.get(session.id) ?? "idle"
   const running = status === "running"
   const tokens = totalTokens(session.tokens)
-  const duration = elapsed(session, status)
+  const duration = runDuration(session.time, running)
   const hasChildren = node.children.length > 0
   const children = splitChildren(node.children, statuses)
 
@@ -444,7 +466,7 @@ function AgentTreeNode(props: {
     <box flexDirection="column" gap={0} marginLeft={indent}>
       {/* Line 1: status + agent name + kind, duration on the right (never shrinks). */}
       <box flexDirection="row" gap={1} height={1}>
-        <StatusDot running={running} />
+        <StatusDot running={running} outcome={session.outcome} />
         <text
           fg={ctx.theme.text.base}
           selectable={false}
@@ -729,11 +751,20 @@ function Panel(props: { sessionID: string }) {
   let tickTimer: ReturnType<typeof setTimeout> | undefined
   let requestSeq = 0
 
+  // The family list is otherwise only what the events happened to announce, and a child's record (tokens,
+  // time.updated, time.idle) is never re-fetched after it was announced: the root is fetched with its children.
+  // The plugin's context typing declares the one-argument form only, while the store the TUI passes in also accepts
+  // `{ children: true }` (the session plus its direct children), so the view is widened instead of the method rebound.
+  const sessions = ctx.data.session as typeof ctx.data.session & {
+    sync(sessionID: string, options?: { children?: boolean }): Promise<void>
+  }
   const refresh = async () => {
     const seq = ++requestSeq
     try {
-      // Sync session family to ensure cache is fresh
-      await ctx.data.session.sync(props.sessionID)
+      const rootID = ctx.data.session.root(props.sessionID)
+      await sessions.sync(rootID, { children: true })
+      if (seq !== requestSeq) return
+      if (rootID !== props.sessionID) await sessions.sync(props.sessionID)
       if (seq !== requestSeq) return
       setTick((v) => v + 1)
       setFailed(false)
@@ -811,10 +842,6 @@ function Panel(props: { sessionID: string }) {
     for (const off of subscriptions) off()
     if (refreshTimer) clearTimeout(refreshTimer)
     if (tickTimer) clearTimeout(tickTimer)
-  })
-
-  onMount(() => {
-    void ctx.data.session.sync(props.sessionID)
   })
 
   return (

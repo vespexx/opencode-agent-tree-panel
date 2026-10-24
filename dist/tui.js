@@ -1,10 +1,11 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "@opentui/solid/jsx-runtime";
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { getLiteLLMData, lookupAlias, lookupPricing, extractAlias, } from "./litellm";
 import { MAX_PREVIOUS_MODELS, cachedModelHistory, emptyUsage, mergeUsage, modelKey, modelText, recordModelSwitch, usageOf, } from "./models";
-import { fmtDuration, fmtSpend, fmtTokens, rateLine, spendOf, sumSpend } from "./format";
+import { fmtDuration, fmtSpend, fmtTokens, rateLine, runDuration, spendOf, sumSpend } from "./format";
+import { liveStatus, statusGlyph } from "./liveness";
 import { readServed, servedSummary } from "./served";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -31,11 +32,18 @@ const ATTR_BOLD = 1;
 const ATTR_DIM = 2;
 const ATTR_ITALIC = 3;
 const ATTR_UNDERLINE = 4;
-/** Status dot: filled while the session is running. */
+/**
+ * Status dot: the glyph is filled while the session is running, an x marks a failed last run.
+ */
 function StatusDot(props) {
     const ctx = usePlugin();
-    const color = props.running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base;
-    return (_jsx("text", { fg: color, selectable: false, flexShrink: 0, children: props.running ? "●" : "○" }));
+    const glyph = statusGlyph(props.running, props.outcome);
+    const color = props.running
+        ? ctx.theme.text.feedback.success.base
+        : glyph === "✗"
+            ? ctx.theme.text.feedback.error.base
+            : ctx.theme.text.feedback.info.base;
+    return (_jsx("text", { fg: color, selectable: false, flexShrink: 0, children: glyph }));
 }
 /** Recursive tree builder from flat family list. */
 function buildTree(sessionIDs, getSession) {
@@ -76,11 +84,6 @@ function buildTree(sessionIDs, getSession) {
 function totalTokens(tokens) {
     return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write;
 }
-/** Elapsed time since session creation (or last update if running). */
-function elapsed(session, status) {
-    const end = status === "running" ? session.time.updated : (session.time.idle ?? session.time.updated);
-    return Math.max(0, end - session.time.created);
-}
 /** Running entries first, then the most recently touched ones. */
 function sortByActivity(nodes, statuses) {
     return [...nodes].sort((a, b) => {
@@ -107,7 +110,7 @@ function splitChildren(nodes, statuses) {
         bucket.group.count += 1;
         bucket.group.tokens += totalTokens(session.tokens);
         bucket.group.cost += session.cost;
-        bucket.group.duration += elapsed(session, "idle");
+        bucket.group.duration += runDuration(session.time, false);
         bucket.group.updated = Math.max(bucket.group.updated, session.time.updated);
         // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
         const modelID = modelKey(session.model);
@@ -125,7 +128,7 @@ function splitChildren(nodes, statuses) {
             use.tokens += totalTokens(session.tokens);
             mergeUsage(use.usage, usageOf(session.tokens));
             use.cost += session.cost;
-            use.duration += elapsed(session, "idle");
+            use.duration += runDuration(session.time, false);
             use.lastUsed = Math.max(use.lastUsed, session.time.updated);
             bucket.models.set(modelID, use);
         }
@@ -191,12 +194,31 @@ function AgentsSection(props) {
         const get = (id) => ctx.data.session.get(id);
         return buildTree(ids, get);
     });
-    // Status per session (for live "running" indicator)
+    // Status per session (for live "running" indicator).
+    // The event flag alone is not trustworthy (see liveness.ts) and refresh() keeps the whole family's records current,
+    // so the two are reconciled here.
     const statuses = createMemo(() => {
         props.tick;
-        const ids = ctx.data.session.family(props.sessionID);
         const map = new Map();
-        for (const id of ids) {
+        // The tree holds the family nested, so it is walked down: every session needs a status, not only the roots.
+        const visit = (nodes) => {
+            for (const node of nodes) {
+                const session = node.session;
+                map.set(session.id, liveStatus({
+                    reported: ctx.data.session.status(session.id),
+                    idle: session.time?.idle,
+                    updated: session.time?.updated ?? 0,
+                    tokens: totalTokens(session.tokens),
+                }));
+                if (node.children.length > 0)
+                    visit(node.children);
+            }
+        };
+        visit(family());
+        // A session announced but not in the tree yet (its record is not cached) keeps the event flag as it stands.
+        for (const id of ctx.data.session.family(props.sessionID)) {
+            if (map.has(id))
+                continue;
             map.set(id, ctx.data.session.status(id));
         }
         return map;
@@ -212,7 +234,7 @@ function AgentTreeNode(props) {
     const status = statuses.get(session.id) ?? "idle";
     const running = status === "running";
     const tokens = totalTokens(session.tokens);
-    const duration = elapsed(session, status);
+    const duration = runDuration(session.time, running);
     const hasChildren = node.children.length > 0;
     const children = splitChildren(node.children, statuses);
     const agentName = session.agent ?? "default";
@@ -232,7 +254,7 @@ function AgentTreeNode(props) {
     const spend = spendOf(session.cost, usageOf(session.tokens), pricing);
     // Rates behind an estimate. Built up front: nothing here may touch `pricing` when the LiteLLM map is still loading.
     const rates = rateLine(spend, pricing, kind === "primary");
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running, outcome: session.outcome }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
                         const u = upstream;
                         // The deployment id proves which target answered; without a served record there is nothing to add.
                         const suffix = servedID && !summary?.fallback ? ` · ${servedID}` : "";
@@ -366,11 +388,20 @@ function Panel(props) {
     const TICK_THROTTLE_MS = 250;
     let tickTimer;
     let requestSeq = 0;
+    // The family list is otherwise only what the events happened to announce, and a child's record (tokens,
+    // time.updated, time.idle) is never re-fetched after it was announced: the root is fetched with its children.
+    // The plugin's context typing declares the one-argument form only, while the store the TUI passes in also accepts
+    // `{ children: true }` (the session plus its direct children), so the view is widened instead of the method rebound.
+    const sessions = ctx.data.session;
     const refresh = async () => {
         const seq = ++requestSeq;
         try {
-            // Sync session family to ensure cache is fresh
-            await ctx.data.session.sync(props.sessionID);
+            const rootID = ctx.data.session.root(props.sessionID);
+            await sessions.sync(rootID, { children: true });
+            if (seq !== requestSeq)
+                return;
+            if (rootID !== props.sessionID)
+                await sessions.sync(props.sessionID);
             if (seq !== requestSeq)
                 return;
             setTick((v) => v + 1);
@@ -448,9 +479,6 @@ function Panel(props) {
             clearTimeout(refreshTimer);
         if (tickTimer)
             clearTimeout(tickTimer);
-    });
-    onMount(() => {
-        void ctx.data.session.sync(props.sessionID);
     });
     return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick(), llm: llm() }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
 }

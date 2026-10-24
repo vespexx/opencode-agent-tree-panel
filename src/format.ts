@@ -82,3 +82,18 @@ export function rateLine(spend: Spend, pricing: ModelPricing | undefined, primar
     `cache ${fmtRate(pricing.cacheRead)}/M`
   )
 }
+
+/**
+ * How long a run took, in milliseconds.
+ *
+ * While the session runs the wall clock is the only honest number: a running row's cached `time.updated` can be stale,
+ * so `now` is used. Once it stopped, the last completion (`time.idle`) is the end of the run.
+ */
+export function runDuration(
+  time: { created: number; updated: number; idle?: number },
+  running: boolean,
+  now = Date.now(),
+): number {
+  const end = running ? now : (time.idle ?? time.updated)
+  return Math.max(0, end - Math.max(0, time.created ?? 0))
+}

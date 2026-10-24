@@ -20,8 +20,8 @@ Right-sidebar panel for OpenCode showing the agent/sub-agent tree with models, t
     (`≈ $0.36`), so a paid model never looks free
   - **Totals**: a `session total` line with tokens and cost (summing input + output + reasoning + cache); under the
     primary session an estimated total also shows the rates it used
-  - Elapsed duration
-  - Live status indicator (● running / ○ idle)
+  - Elapsed duration (wall clock while the agent runs, the length of the run once it stopped)
+  - Live status indicator (● running / ○ idle / ✗ last run failed)
 
 - **Tools section**: Tool calls from the current step showing:
   - Tool name
@@ -59,7 +59,7 @@ cp dist/* ~/.config/opencode/plugins/agent-tree-panel/
 cat > ~/.config/opencode/plugins/agent-tree-panel/package.json <<'EOF'
 {
   "name": "opencode-agent-tree-panel",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -263,6 +263,13 @@ Limits worth knowing:
   (used by the checks).
 - Grouped finished sub-agents (`worker-coder ×3`) do not carry a served-deployment id: the record is per session and a
   group spans several of them, so the group row shows the statically resolved alias only.
+- Every refresh fetches the root together with its children, so a sub-agent appears even when its creation event was
+  missed, and each child's tokens and times are current rather than frozen at the moment the client first saw it.
+- A row is `running` only when the session record agrees: `time.idle` is absent, or `time.updated` moved past it. A
+  `running` flag left over from a run whose completion is already in the record is corrected to idle, a run whose start
+  event was missed is still shown as running, and a failed last run is marked `✗` instead of a plain idle circle. The
+  one case the record cannot settle is a stale flag on a session that was also touched after its last completion — it is
+  left as the events report it, because a late title/usage write and a new run look the same in `time.updated`.
 - At most 3 past models are listed; the rest collapse into `↳ +N earlier`.
 - An `≈` cost is an estimate at the highest rate LiteLLM publishes for that deployment, computed from the session's own
   token counts (per model, from the loaded transcript window). It is an upper bound: peak instead of off-peak, the most
@@ -286,7 +293,7 @@ Limits worth knowing:
 
 ```bash
 npm run dev    # TypeScript watch mode
-npm run check  # model-history + served-deployment + pricing + rendering helpers (85 assertions)
+npm run check  # model-history + served-deployment + pricing + rendering helpers + liveness rules (101 assertions)
 ```
 
 ## Requirements
