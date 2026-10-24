@@ -70,6 +70,10 @@ function ModelLabel(props) {
     const ctx = usePlugin();
     if (!props.model)
         return _jsx("text", { fg: ctx.theme.text.faint, selectable: false, children: "\u2014" });
+    // Handle both object and string formats
+    if (typeof props.model === "string") {
+        return _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_DIM, children: props.model });
+    }
     const { providerID, id, variant } = props.model;
     return (_jsxs("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_DIM, children: [providerID, "/", id, variant ? `@${variant}` : ""] }));
 }
@@ -203,7 +207,7 @@ function ToolRow(props) {
     const statusLabel = error ? "error" : running ? "running" : completed ? "done" : "pending";
     // Use a colored left border via a thin box
     const leftBorder = _jsx("box", { width: 1, backgroundColor: statusColor + "80", height: 1 });
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content[0]?.text?.slice(0, 120) ?? "error" }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content?.[0]?.text?.slice(0, 120) ?? "error" }) })] }));
 }
 /** Main panel component. */
 function Panel(props) {
