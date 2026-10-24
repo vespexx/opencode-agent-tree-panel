@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "@opentui/solid/jsx-runtime";
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { getAliasMap, lookupAlias, extractAlias, } from "./litellm";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
     "session.created",
@@ -136,7 +137,7 @@ function splitChildren(nodes, statuses) {
         const key = session.agent ?? "default";
         const model = modelText(session.model);
         const bucket = buckets.get(key) ?? {
-            group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, updated: 0 },
+            group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, modelRef: session.model, updated: 0 },
             models: new Set(),
         };
         bucket.group.count += 1;
@@ -159,7 +160,13 @@ function splitChildren(nodes, statuses) {
 function AgentGroupRow(props) {
     const ctx = usePlugin();
     const group = props.group;
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: group.model }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
+    // Resolve upstream model for LiteLLM aliases
+    const alias = group.modelRef ? extractAlias(group.modelRef) : undefined;
+    const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined;
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: group.model }), (() => {
+                        const u = upstream;
+                        return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
+                    })(), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
 }
 /** Agent tree section. */
 function AgentsSection(props) {
@@ -182,11 +189,11 @@ function AgentsSection(props) {
         return map;
     });
     const roots = createMemo(() => sortByActivity(family(), statuses()));
-    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [family().length, " total"] })] }), _jsx(For, { each: roots(), children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses() }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [family().length, " total"] })] }), _jsx(For, { each: roots(), children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses(), aliasMap: props.aliasMap }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
 }
 /** Recursive tree node renderer. */
 function AgentTreeNode(props) {
-    const { node, statuses } = props;
+    const { node, statuses, aliasMap } = props;
     const ctx = usePlugin();
     const session = node.session;
     const status = statuses.get(session.id) ?? "idle";
@@ -199,7 +206,13 @@ function AgentTreeNode(props) {
     const kind = session.parentID ? "sub" : "primary";
     // Nesting already indents by 2 per level, so only non-root nodes add their own step.
     const indent = node.depth > 0 ? 2 : 0;
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(session.model) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group }) })] })] }));
+    // Resolve upstream model for LiteLLM aliases
+    const alias = extractAlias(session.model);
+    const upstream = alias ? lookupAlias(aliasMap, alias) : undefined;
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(session.model) }), (() => {
+                        const u = upstream;
+                        return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
+                    })(), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, aliasMap: aliasMap }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, aliasMap: aliasMap }) })] })] }));
 }
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool) {
@@ -297,6 +310,25 @@ function Panel(props) {
     const ctx = usePlugin();
     const [tick, setTick] = createSignal(0);
     const [failed, setFailed] = createSignal(false);
+    const [aliasMap, setAliasMap] = createSignal(new Map());
+    const [aliasLoading, setAliasLoading] = createSignal(false);
+    // Load alias map on first mount
+    createEffect(on(() => props.sessionID, async () => {
+        setAliasLoading(true);
+        try {
+            // Sync providers to ensure cache is fresh
+            await ctx.data.location.provider.sync();
+            const providers = (ctx.data.location.provider.list() ?? []);
+            const map = await getAliasMap("litellm", providers);
+            setAliasMap(map);
+        }
+        catch {
+            // silently ignore — upstream display is optional
+        }
+        finally {
+            setAliasLoading(false);
+        }
+    }));
     let refreshTimer;
     const REFRESH_DEBOUNCE_MS = 400;
     const TICK_THROTTLE_MS = 250;
@@ -363,7 +395,7 @@ function Panel(props) {
     onMount(() => {
         void ctx.data.session.sync(props.sessionID);
     });
-    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick() }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick(), aliasMap: aliasMap() }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
 }
 /** Plugin definition. */
 export default Plugin.define({

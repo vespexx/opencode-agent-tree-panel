@@ -2,6 +2,13 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { RGBA } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
+import {
+  getAliasMap,
+  lookupAlias,
+  extractAlias,
+  type UpstreamModel,
+  type ProviderInfoLike,
+} from "./litellm"
 
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -188,6 +195,7 @@ interface AgentGroup {
   cost: number
   duration: number
   model: string
+  modelRef?: { id: string; providerID: string; variant?: string } | string
   updated: number
 }
 
@@ -203,7 +211,7 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
     const key = session.agent ?? "default"
     const model = modelText(session.model)
     const bucket = buckets.get(key) ?? {
-      group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, updated: 0 },
+      group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, modelRef: session.model, updated: 0 },
       models: new Set<string>(),
     }
     bucket.group.count += 1
@@ -226,9 +234,14 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
 }
 
 /** Completed runs of one agent, rolled into a three-line block with totals. */
-function AgentGroupRow(props: { group: AgentGroup }) {
+function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, UpstreamModel> }) {
   const ctx = usePlugin()
   const group = props.group
+
+  // Resolve upstream model for LiteLLM aliases
+  const alias = group.modelRef ? extractAlias(group.modelRef) : undefined
+  const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined
+
   return (
     <box flexDirection="column" gap={0} marginLeft={2}>
       <box flexDirection="row" gap={1} height={1}>
@@ -247,6 +260,14 @@ function AgentGroupRow(props: { group: AgentGroup }) {
         <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {group.model}
         </text>
+        {(() => {
+          const u = upstream
+          return u ? (
+            <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+              → {u.upstream}
+            </text>
+          ) : null
+        })()}
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
         </text>
@@ -256,7 +277,7 @@ function AgentGroupRow(props: { group: AgentGroup }) {
 }
 
 /** Agent tree section. */
-function AgentsSection(props: { sessionID: string; tick: number }) {
+function AgentsSection(props: { sessionID: string; tick: number; aliasMap: Map<string, UpstreamModel> }) {
   const ctx = usePlugin()
 
   // Build the tree from family + cache
@@ -292,7 +313,7 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
         </text>
       </box>
 
-      <For each={roots()}>{(root) => <AgentTreeNode node={root} statuses={statuses()} />}</For>
+      <For each={roots()}>{(root) => <AgentTreeNode node={root} statuses={statuses()} aliasMap={props.aliasMap} />}</For>
 
       <Show when={family().length === 0}>
         <text fg={ctx.theme.text.faint} selectable={false} marginTop={1}>
@@ -304,8 +325,12 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
 }
 
 /** Recursive tree node renderer. */
-function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | "running"> }) {
-  const { node, statuses } = props
+function AgentTreeNode(props: {
+  node: AgentNode
+  statuses: Map<string, "idle" | "running">
+  aliasMap: Map<string, UpstreamModel>
+}) {
+  const { node, statuses, aliasMap } = props
   const ctx = usePlugin()
   const session = node.session
   const status = statuses.get(session.id) ?? "idle"
@@ -319,6 +344,10 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
   const kind = session.parentID ? "sub" : "primary"
   // Nesting already indents by 2 per level, so only non-root nodes add their own step.
   const indent = node.depth > 0 ? 2 : 0
+
+  // Resolve upstream model for LiteLLM aliases
+  const alias = extractAlias(session.model)
+  const upstream = alias ? lookupAlias(aliasMap, alias) : undefined
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -349,6 +378,14 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
         <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {modelText(session.model)}
         </text>
+        {(() => {
+          const u = upstream
+          return u ? (
+            <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+              → {u.upstream}
+            </text>
+          ) : null
+        })()}
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
         </text>
@@ -356,8 +393,12 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
 
       {/* Live sub-agents in full detail, finished ones rolled up per agent. */}
       <Show when={hasChildren}>
-        <For each={children.running}>{(child) => <AgentTreeNode node={child} statuses={statuses} />}</For>
-        <For each={children.groups}>{(group) => <AgentGroupRow group={group} />}</For>
+        <For each={children.running}>
+          {(child) => <AgentTreeNode node={child} statuses={statuses} aliasMap={aliasMap} />}
+        </For>
+        <For each={children.groups}>
+          {(group) => <AgentGroupRow group={group} aliasMap={aliasMap} />}
+        </For>
       </Show>
     </box>
   )
@@ -544,6 +585,29 @@ function Panel(props: { sessionID: string }) {
   const ctx = usePlugin()
   const [tick, setTick] = createSignal(0)
   const [failed, setFailed] = createSignal(false)
+  const [aliasMap, setAliasMap] = createSignal<Map<string, UpstreamModel>>(new Map())
+  const [aliasLoading, setAliasLoading] = createSignal(false)
+
+  // Load alias map on first mount
+  createEffect(
+    on(
+      () => props.sessionID,
+      async () => {
+        setAliasLoading(true)
+        try {
+          // Sync providers to ensure cache is fresh
+          await ctx.data.location.provider.sync()
+          const providers = (ctx.data.location.provider.list() ?? []) as ProviderInfoLike[]
+          const map = await getAliasMap("litellm", providers)
+          setAliasMap(map)
+        } catch {
+          // silently ignore — upstream display is optional
+        } finally {
+          setAliasLoading(false)
+        }
+      },
+    ),
+  )
 
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   const REFRESH_DEBOUNCE_MS = 400
@@ -624,7 +688,7 @@ function Panel(props: { sessionID: string }) {
         </text>
       </Show>
 
-      <AgentsSection sessionID={props.sessionID} tick={tick()} />
+      <AgentsSection sessionID={props.sessionID} tick={tick()} aliasMap={aliasMap()} />
       <ToolsSection sessionID={props.sessionID} tick={tick()} />
     </box>
   )
