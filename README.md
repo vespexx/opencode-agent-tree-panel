@@ -26,7 +26,7 @@ Right-sidebar panel for OpenCode showing the agent/sub-agent tree with models, t
 ### From source (local development)
 
 ```bash
-git clone https://github.com/book16/opencode-agent-tree-panel
+git clone https://github.com/vespexx/opencode-agent-tree-panel
 cd opencode-agent-tree-panel
 npm install
 npm run build
