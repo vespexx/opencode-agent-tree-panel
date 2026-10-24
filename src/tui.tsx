@@ -170,10 +170,6 @@ function elapsed(session: SessionInfo, status: "idle" | "running"): number {
   return Math.max(0, end - session.time.created)
 }
 
-/** How many finished entries stay visible before they fold into a summary line. */
-const MAX_FINISHED_AGENTS = 3
-const MAX_FINISHED_TOOLS = 3
-
 /** Running entries first, then the most recently touched ones. */
 function sortByActivity(nodes: AgentNode[], statuses: Map<string, "idle" | "running">): AgentNode[] {
   return [...nodes].sort((a, b) => {
@@ -184,43 +180,77 @@ function sortByActivity(nodes: AgentNode[], statuses: Map<string, "idle" | "runn
   })
 }
 
-/** Visible children plus a per-agent tally of the ones folded away. */
+/** One finished-agent bucket: every completed run of the same agent, summed up. */
+interface AgentGroup {
+  agent: string
+  count: number
+  tokens: number
+  cost: number
+  duration: number
+  model: string
+  updated: number
+}
+
+/** Split children into the ones still running and per-agent totals of the finished ones. */
 function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "running">) {
   const sorted = sortByActivity(nodes, statuses)
   const running = sorted.filter((n) => statuses.get(n.session.id) === "running")
   const finished = sorted.filter((n) => statuses.get(n.session.id) !== "running")
-  const hidden = finished.slice(MAX_FINISHED_AGENTS)
-  const counts = new Map<string, number>()
-  for (const node of hidden) {
-    const key = node.session.agent ?? "default"
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+
+  const buckets = new Map<string, { group: AgentGroup; models: Set<string> }>()
+  for (const node of finished) {
+    const session = node.session
+    const key = session.agent ?? "default"
+    const model = modelText(session.model)
+    const bucket = buckets.get(key) ?? {
+      group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, updated: 0 },
+      models: new Set<string>(),
+    }
+    bucket.group.count += 1
+    bucket.group.tokens += totalTokens(session.tokens)
+    bucket.group.cost += session.cost
+    bucket.group.duration += elapsed(session, "idle")
+    bucket.group.updated = Math.max(bucket.group.updated, session.time.updated)
+    bucket.models.add(model)
+    buckets.set(key, bucket)
   }
-  return {
-    visible: [...running, ...finished.slice(0, MAX_FINISHED_AGENTS)],
-    hiddenTotal: hidden.length,
-    hiddenCounts: counts,
-  }
+
+  const groups = [...buckets.values()]
+    .map(({ group, models }) => ({
+      ...group,
+      model: models.size === 1 ? [...models][0]! : `${models.size} models`,
+    }))
+    .sort((a, b) => b.updated - a.updated)
+
+  return { running, groups, finishedTotal: finished.length }
 }
 
-/** "worker-coder ×4, worker-ops ×3" — biggest group first. */
-function tallyText(counts: Map<string, number>): string {
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, count]) => `${name} ×${count}`)
-    .join(", ")
-}
-
-/** Folded-away finished entries rendered as one dim line. */
-function HiddenSummary(props: { total: number; text: string; indent: number }) {
+/** Completed runs of one agent, rolled into a three-line block with totals. */
+function AgentGroupRow(props: { group: AgentGroup }) {
   const ctx = usePlugin()
+  const group = props.group
   return (
-    <box flexDirection="row" gap={1} marginLeft={props.indent} paddingLeft={2}>
-      <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
-        +{props.total}
-      </text>
-      <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char" flexShrink={1}>
-        {props.text}
-      </text>
+    <box flexDirection="column" gap={0} marginLeft={2}>
+      <box flexDirection="row" gap={1} height={1}>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+          ○
+        </text>
+        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
+          {group.agent} ×{group.count}
+        </text>
+        <box flexGrow={1} />
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+          {fmtDuration(group.duration)}
+        </text>
+      </box>
+      <box flexDirection="column" paddingLeft={2}>
+        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+          {group.model}
+        </text>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+          {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
+        </text>
+      </box>
     </box>
   )
 }
@@ -248,7 +278,7 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
     return map
   })
 
-  const roots = createMemo(() => splitChildren(family(), statuses()))
+  const roots = createMemo(() => sortByActivity(family(), statuses()))
 
   return (
     <box flexDirection="column" gap={1}>
@@ -262,13 +292,7 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
         </text>
       </box>
 
-      <For each={roots().visible}>
-        {(root) => <AgentTreeNode node={root} statuses={statuses()} />}
-      </For>
-
-      <Show when={roots().hiddenTotal > 0}>
-        <HiddenSummary total={roots().hiddenTotal} text={tallyText(roots().hiddenCounts)} indent={0} />
-      </Show>
+      <For each={roots()}>{(root) => <AgentTreeNode node={root} statuses={statuses()} />}</For>
 
       <Show when={family().length === 0}>
         <text fg={ctx.theme.text.faint} selectable={false} marginTop={1}>
@@ -293,39 +317,8 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
 
   const agentName = session.agent ?? "default"
   const kind = session.parentID ? "sub" : "primary"
-  // The root and whatever is running stay expanded; finished sub-agents fold to one line.
-  const compact = !running && node.depth > 0
-  const indent = node.depth * 2
-
-  const childrenBlock = (
-    <Show when={hasChildren}>
-      <For each={children.visible}>{(child) => <AgentTreeNode node={child} statuses={statuses} />}</For>
-      <Show when={children.hiddenTotal > 0}>
-        <HiddenSummary total={children.hiddenTotal} text={tallyText(children.hiddenCounts)} indent={0} />
-      </Show>
-    </Show>
-  )
-
-  if (compact) {
-    return (
-      <box flexDirection="column" gap={0} marginLeft={indent}>
-        <box flexDirection="row" gap={1} height={1}>
-          <StatusDot running={false} />
-          <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
-            {agentName}
-          </text>
-          <box flexGrow={1} />
-          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
-            {fmtDuration(duration)}
-          </text>
-          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} width={6} textAlign="right" flexShrink={0}>
-            {fmtTokens(tokens)}
-          </text>
-        </box>
-        {childrenBlock}
-      </box>
-    )
-  }
+  // Nesting already indents by 2 per level, so only non-root nodes add their own step.
+  const indent = node.depth > 0 ? 2 : 0
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -361,7 +354,11 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
         </text>
       </box>
 
-      {childrenBlock}
+      {/* Live sub-agents in full detail, finished ones rolled up per agent. */}
+      <Show when={hasChildren}>
+        <For each={children.running}>{(child) => <AgentTreeNode node={child} statuses={statuses} />}</For>
+        <For each={children.groups}>{(group) => <AgentGroupRow group={group} />}</For>
+      </Show>
     </box>
   )
 }
@@ -369,6 +366,15 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool: ToolPart): boolean {
   return tool.state.status === "running" || tool.state.status === "streaming"
+}
+
+/** Wall-clock time a tool call took: queued plus executed. */
+function toolDuration(tool: ToolPart): number {
+  const { time } = tool
+  if (time.completed && time.created) return time.completed - time.created
+  if (time.ran && time.created) return time.ran - time.created
+  if (time.created) return Date.now() - time.created
+  return 0
 }
 
 /** Tools section showing current step's tool calls. */
@@ -389,7 +395,7 @@ function ToolsSection(props: { sessionID: string; tick: number }) {
     return []
   })
 
-  // Running first, then the newest calls.
+  // Running calls in full detail, finished ones rolled up per tool name.
   const ordered = createMemo(() => {
     const sorted = [...latestTools()].sort((a, b) => {
       const aRunning = isToolRunning(a) ? 1 : 0
@@ -397,14 +403,20 @@ function ToolsSection(props: { sessionID: string; tick: number }) {
       if (aRunning !== bRunning) return bRunning - aRunning
       return b.time.created - a.time.created
     })
-    const finished = sorted.filter((tool) => !isToolRunning(tool))
-    const hidden = finished.slice(MAX_FINISHED_TOOLS)
-    const counts = new Map<string, number>()
-    for (const tool of hidden) counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1)
+
+    const buckets = new Map<string, { name: string; count: number; duration: number; updated: number }>()
+    for (const tool of sorted) {
+      if (isToolRunning(tool)) continue
+      const bucket = buckets.get(tool.name) ?? { name: tool.name, count: 0, duration: 0, updated: 0 }
+      bucket.count += 1
+      bucket.duration += toolDuration(tool)
+      bucket.updated = Math.max(bucket.updated, tool.time.completed ?? tool.time.ran ?? tool.time.created)
+      buckets.set(tool.name, bucket)
+    }
+
     return {
-      visible: [...sorted.filter(isToolRunning), ...finished.slice(0, MAX_FINISHED_TOOLS)],
-      hiddenTotal: hidden.length,
-      hiddenCounts: counts,
+      running: sorted.filter(isToolRunning),
+      groups: [...buckets.values()].sort((a, b) => b.updated - a.updated),
       total: sorted.length,
     }
   })
@@ -442,30 +454,42 @@ function ToolsSection(props: { sessionID: string; tick: number }) {
         </text>
       </box>
 
-      <For each={tools.visible}>{(tool) => <ToolRow tool={tool} compact={!isToolRunning(tool)} />}</For>
-
-      <Show when={tools.hiddenTotal > 0}>
-        <HiddenSummary total={tools.hiddenTotal} text={tallyText(tools.hiddenCounts)} indent={0} />
-      </Show>
+      <For each={tools.running}>{(tool) => <ToolRow tool={tool} />}</For>
+      <For each={tools.groups}>{(group) => <ToolGroupRow group={group} />}</For>
     </box>
   )
 }
 
-/** Single tool call row. */
-function ToolRow(props: { tool: ToolPart; compact?: boolean }) {
+/** Completed calls of one tool, rolled into a single line with the total time. */
+function ToolGroupRow(props: { group: { name: string; count: number; duration: number } }) {
+  const ctx = usePlugin()
+  return (
+    <box flexDirection="row" gap={1} height={1} marginLeft={1} paddingLeft={1}>
+      <text fg={ctx.theme.text.feedback.success.base} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+        ✓
+      </text>
+      <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
+        {props.group.name} ×{props.group.count}
+      </text>
+      <box flexGrow={1} />
+      <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+        {fmtDuration(props.group.duration)}
+      </text>
+    </box>
+  )
+}
+
+/** Single tool call row (only ever rendered for calls that are still running). */
+function ToolRow(props: { tool: ToolPart }) {
   const { tool } = props
   const ctx = usePlugin()
-  const { name, state, time } = tool
+  const { name, state } = tool
   const status = state.status
   const running = status === "running" || status === "streaming"
   const completed = status === "completed"
   const error = status === "error"
 
-  // Duration
-  let duration = 0
-  if (time.ran && time.created) duration = time.ran - time.created
-  if (time.completed && time.ran) duration = time.completed - time.ran
-  if (!time.ran && time.created) duration = Date.now() - time.created
+  const duration = toolDuration(tool)
 
   const statusColor = error
     ? ctx.theme.text.feedback.error.base
@@ -500,7 +524,7 @@ function ToolRow(props: { tool: ToolPart; compact?: boolean }) {
         </text>
       </box>
 
-      <Show when={!props.compact && state.input && Object.keys(state.input).length > 0}>
+      <Show when={state.input && Object.keys(state.input).length > 0}>
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="char">
           {JSON.stringify(state.input).slice(0, 120)}{JSON.stringify(state.input).length > 120 ? "…" : ""}
         </text>
@@ -601,7 +625,6 @@ function Panel(props: { sessionID: string }) {
       </Show>
 
       <AgentsSection sessionID={props.sessionID} tick={tick()} />
-      <box height={1} backgroundColor={ctx.theme.border.base} />
       <ToolsSection sessionID={props.sessionID} tick={tick()} />
     </box>
   )
