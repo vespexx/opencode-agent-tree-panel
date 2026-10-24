@@ -2,8 +2,8 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "@opentui/soli
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { getLiteLLMData, lookupAlias, extractAlias, } from "./litellm";
-import { MAX_PREVIOUS_MODELS, cachedModelHistory, modelKey, modelText, recordModelSwitch, } from "./models";
+import { estimateCost, getLiteLLMData, lookupAlias, lookupPricing, extractAlias, } from "./litellm";
+import { MAX_PREVIOUS_MODELS, cachedModelHistory, emptyUsage, modelKey, modelText, recordModelSwitch, usageOf, } from "./models";
 import { readServed, servedSummary } from "./served";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -58,6 +58,45 @@ function fmtDuration(ms) {
         return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
     const h = Math.floor(m / 60);
     return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
+}
+/** A per-token rate as USD per million tokens, the unit prices are usually compared in. */
+function fmtRate(perToken) {
+    const perMillion = perToken * 1_000_000;
+    if (!Number.isFinite(perMillion) || perMillion <= 0)
+        return "$0";
+    if (perMillion >= 0.1)
+        return `$${perMillion.toFixed(2)}`;
+    if (perMillion >= 0.001)
+        return `$${perMillion.toFixed(3)}`;
+    return `$${perMillion.toFixed(4)}`;
+}
+/**
+ * Cost of some tokens, preferring the number OpenCode reported.
+ *
+ * OpenCode prices a model only when it knows the id (its model registry); a locally defined LiteLLM alias is unknown to
+ * it, so every message of such a model comes back with `cost: 0` even though the proxy charges for it. In that case the
+ * panel prices the tokens itself from `/model/info` — at the highest published rate, so the number is an upper bound.
+ */
+function spendOf(reported, usage, pricing) {
+    if (reported > 0)
+        return { cost: reported, estimated: false };
+    const estimate = estimateCost(pricing, usage);
+    return estimate && estimate > 0 ? { cost: estimate, estimated: true } : { cost: reported, estimated: false };
+}
+/** Sum of several spends; the total is an estimate when any part of it is. */
+function sumSpend(spends) {
+    return { cost: spends.reduce((sum, spend) => sum + spend.cost, 0), estimated: spends.some((spend) => spend.estimated) };
+}
+function fmtSpend(spend) {
+    return `${spend.estimated ? "≈ " : ""}${fmtCost(spend.cost)}`;
+}
+/** Add one token breakdown into another (in place). */
+function mergeUsage(target, source) {
+    target.input += source.input;
+    target.output += source.output;
+    target.reasoning += source.reasoning;
+    target.cacheRead += source.cacheRead;
+    target.cacheWrite += source.cacheWrite;
 }
 /** Status dot: filled while the session is running. */
 function StatusDot(props) {
@@ -140,9 +179,18 @@ function splitChildren(nodes, statuses) {
         // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
         const modelID = modelKey(session.model);
         if (session.model && modelID) {
-            const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 };
+            const use = bucket.models.get(modelID) ?? {
+                ref: session.model,
+                requests: 0,
+                lastUsed: 0,
+                tokens: 0,
+                usage: emptyUsage(),
+                cost: 0,
+                duration: 0,
+            };
             use.requests += 1;
             use.tokens += totalTokens(session.tokens);
+            mergeUsage(use.usage, usageOf(session.tokens));
             use.cost += session.cost;
             use.duration += elapsed(session, "idle");
             use.lastUsed = Math.max(use.lastUsed, session.time.updated);
@@ -171,9 +219,11 @@ function PastModels(props) {
     const summaryOf = (use) => props.sessionID
         ? servedSummary(props.served ?? [], props.sessionID, use.ref, extractAlias(use.ref), props.llm.deployments)
         : undefined;
+    const spendOfUse = (use) => spendOf(use.cost, use.usage, lookupPricing(props.llm, extractAlias(use.ref), summaryOf(use)?.servedID));
     return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => {
                     const summary = () => summaryOf(use);
-                    return (_jsxs(_Fragment, { children: [_jsx(Show, { when: use.tokens > 0 || use.cost > 0 || use.duration > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2193 ", fmtTokens(use.tokens), " tok \u00B7 ", fmtCost(use.cost), " \u00B7 ", fmtDuration(use.duration)] }) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] }), _jsx(Show, { when: summary()?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["  → ", summary()?.name ?? summary()?.servedAlias ?? "another deployment", " ⚠"] }) })] }));
+                    const spend = () => spendOfUse(use);
+                    return (_jsxs(_Fragment, { children: [_jsx(Show, { when: use.tokens > 0 || use.cost > 0 || use.duration > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2193 ", fmtTokens(use.tokens), " tok \u00B7 ", fmtSpend(spend()), " \u00B7 ", fmtDuration(use.duration)] }) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] }), _jsx(Show, { when: summary()?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["  → ", summary()?.name ?? summary()?.servedAlias ?? "another deployment", " ⚠"] }) })] }));
                 } }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
 }
 /** Completed runs of one agent, rolled into a three-line block with totals. */
@@ -184,10 +234,14 @@ function AgentGroupRow(props) {
     const current = group.models[0];
     const alias = current ? extractAlias(current.ref) : undefined;
     const upstream = alias ? lookupAlias(props.llm.aliases, alias) : undefined;
+    // A group spans several sessions, so each of its models is priced on its own and the parts are added up.
+    const groupSpend = () => group.models.length === 0
+        ? { cost: group.cost, estimated: false }
+        : sumSpend(group.models.map((use) => spendOf(use.cost, use.usage, lookupPricing(props.llm, extractAlias(use.ref)))));
     return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(current?.ref) }), (() => {
                         const u = upstream;
                         return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
-                    })(), _jsx(PastModels, { models: group.models.slice(1), llm: props.llm }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["group total \u00B7 ", fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
+                    })(), _jsx(PastModels, { models: group.models.slice(1), llm: props.llm }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["group total \u00B7 ", fmtTokens(group.tokens), " tok \u00B7 ", fmtSpend(groupSpend())] })] })] }));
 }
 /** Agent tree section. */
 function AgentsSection(props) {
@@ -240,6 +294,9 @@ function AgentTreeNode(props) {
     // What LiteLLM actually served for the model in effect (from the response headers, via the server hook).
     const summary = servedSummary(served, session.id, history.current ?? session.model, alias, llm.deployments);
     const servedID = summary?.servedID?.slice(0, 8);
+    // Prices of the deployment that answered (or of the alias), used when the harness itself reported no cost.
+    const pricing = lookupPricing(llm, alias, summary?.servedID);
+    const spend = spendOf(session.cost, usageOf(session.tokens), pricing);
     return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
                         const u = upstream;
                         // The deployment id proves which target answered; without a served record there is nothing to add.
@@ -248,7 +305,7 @@ function AgentTreeNode(props) {
                         if (!u && (!summary || summary.fallback))
                             return null;
                         return (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u?.upstream ?? summary?.name ?? (summary?.servedAlias || "deployment"), suffix] }));
-                    })(), _jsx(Show, { when: summary?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u26A0 litellm served ", summary?.name ?? summary?.servedAlias ?? "another deployment", servedID ? ` · ${servedID}` : "", summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""] }) }), _jsx(PastModels, { models: history.previous, llm: llm, sessionID: session.id, served: served }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["session total \u00B7 ", fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, llm: llm, served: served }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, llm: llm }) })] })] }));
+                    })(), _jsx(Show, { when: summary?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u26A0 litellm served ", summary?.name ?? summary?.servedAlias ?? "another deployment", servedID ? ` · ${servedID}` : "", summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""] }) }), _jsx(PastModels, { models: history.previous, llm: llm, sessionID: session.id, served: served }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["session total \u00B7 ", fmtTokens(tokens), " tok \u00B7 ", fmtSpend(spend)] }), _jsx(Show, { when: spend.estimated && kind === "primary" && pricing, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2248 litellm max price \u00B7 in ", fmtRate(pricing.input), "/M \u00B7 out ", fmtRate(pricing.output), "/M \u00B7 cache", " ", fmtRate(pricing.cacheRead), "/M"] }) })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, llm: llm, served: served }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, llm: llm }) })] })] }));
 }
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool) {
@@ -346,7 +403,12 @@ function Panel(props) {
     const ctx = usePlugin();
     const [tick, setTick] = createSignal(0);
     const [failed, setFailed] = createSignal(false);
-    const [llm, setLlm] = createSignal({ aliases: new Map(), deployments: new Map() });
+    const [llm, setLlm] = createSignal({
+        aliases: new Map(),
+        deployments: new Map(),
+        pricing: new Map(),
+        aliasPricing: new Map(),
+    });
     const [aliasLoading, setAliasLoading] = createSignal(false);
     // Load alias + deployment maps on first mount
     createEffect(on(() => props.sessionID, async () => {

@@ -6,6 +6,30 @@
  * the harness appends a `model-switched` entry (with `previous`) for every change, and every assistant message
  * records the model that served it. This module turns that into a "current on top, past below" list.
  */
+/** A zeroed usage (the starting point for accumulation). */
+export function emptyUsage() {
+    return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+}
+/** Split a message's token record into a `Usage`; missing fields count as zero. */
+export function usageOf(tokens) {
+    return {
+        input: tokens?.input ?? 0,
+        output: tokens?.output ?? 0,
+        reasoning: tokens?.reasoning ?? 0,
+        cacheRead: tokens?.cache?.read ?? 0,
+        cacheWrite: tokens?.cache?.write ?? 0,
+    };
+}
+/** Add one message's tokens to a running usage. */
+export function addUsage(target, tokens) {
+    if (!tokens)
+        return;
+    target.input += tokens.input ?? 0;
+    target.output += tokens.output ?? 0;
+    target.reasoning += tokens.reasoning ?? 0;
+    target.cacheRead += tokens.cache?.read ?? 0;
+    target.cacheWrite += tokens.cache?.write ?? 0;
+}
 /** How many past models the panel lists before collapsing the rest into one line. */
 export const MAX_PREVIOUS_MODELS = 3;
 /** Model rendered as provider/model@variant, tolerant of string and object shapes. */
@@ -41,12 +65,13 @@ export function readModelHistory(session, messages) {
             return;
         let use = uses.get(key);
         if (!use) {
-            use = { ref: model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 };
+            use = { ref: model, requests: 0, lastUsed: 0, tokens: 0, usage: emptyUsage(), cost: 0, duration: 0 };
             uses.set(key, use);
         }
         if (request) {
             use.requests += 1;
             use.tokens += usageTokens(request.tokens);
+            addUsage(use.usage, request.tokens);
             use.cost += request.cost ?? 0;
             const { created, completed } = request.time ?? {};
             if (created && completed && completed > created)
@@ -88,7 +113,7 @@ function noteLiveModel(entries, model, at) {
         existing.lastUsed = Math.max(existing.lastUsed, at);
         return;
     }
-    entries.push({ ref: model, requests: 0, lastUsed: at, tokens: 0, cost: 0, duration: 0 });
+    entries.push({ ref: model, requests: 0, lastUsed: at, tokens: 0, usage: emptyUsage(), cost: 0, duration: 0 });
 }
 /** Remember a `session.model.selected` event so the replaced model shows up under the current one. */
 export function recordModelSwitch(sessionID, model, previous, at) {

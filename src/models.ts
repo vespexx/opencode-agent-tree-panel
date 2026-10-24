@@ -28,6 +28,41 @@ export interface SessionLike {
   time: { updated: number }
 }
 
+/** Tokens of one or more requests, split the way the harness counts them. */
+export interface Usage {
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/** A zeroed usage (the starting point for accumulation). */
+export function emptyUsage(): Usage {
+  return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+}
+
+/** Split a message's token record into a `Usage`; missing fields count as zero. */
+export function usageOf(tokens: TranscriptMessage["tokens"]): Usage {
+  return {
+    input: tokens?.input ?? 0,
+    output: tokens?.output ?? 0,
+    reasoning: tokens?.reasoning ?? 0,
+    cacheRead: tokens?.cache?.read ?? 0,
+    cacheWrite: tokens?.cache?.write ?? 0,
+  }
+}
+
+/** Add one message's tokens to a running usage. */
+export function addUsage(target: Usage, tokens: TranscriptMessage["tokens"]): void {
+  if (!tokens) return
+  target.input += tokens.input ?? 0
+  target.output += tokens.output ?? 0
+  target.reasoning += tokens.reasoning ?? 0
+  target.cacheRead += tokens.cache?.read ?? 0
+  target.cacheWrite += tokens.cache?.write ?? 0
+}
+
 /** One model that took part in a session: how many requests it served and what they cost. */
 export interface ModelUse {
   ref: ModelValue
@@ -37,6 +72,8 @@ export interface ModelUse {
   lastUsed: number
   /** Tokens (input + output + reasoning + cache) of the requests this model served. */
   tokens: number
+  /** The same tokens split by kind, so a model the harness could not price can still be estimated. */
+  usage: Usage
   /** Cost of those requests. */
   cost: number
   /** Wall-clock time spent answering them. */
@@ -83,12 +120,13 @@ export function readModelHistory(session: SessionLike, messages: TranscriptMessa
     if (!key || !model) return
     let use = uses.get(key)
     if (!use) {
-      use = { ref: model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 }
+      use = { ref: model, requests: 0, lastUsed: 0, tokens: 0, usage: emptyUsage(), cost: 0, duration: 0 }
       uses.set(key, use)
     }
     if (request) {
       use.requests += 1
       use.tokens += usageTokens(request.tokens)
+      addUsage(use.usage, request.tokens)
       use.cost += request.cost ?? 0
       const { created, completed } = request.time ?? {}
       if (created && completed && completed > created) use.duration += completed - created
@@ -130,7 +168,7 @@ function noteLiveModel(entries: ModelUse[], model: ModelValue, at: number) {
     existing.lastUsed = Math.max(existing.lastUsed, at)
     return
   }
-  entries.push({ ref: model, requests: 0, lastUsed: at, tokens: 0, cost: 0, duration: 0 })
+  entries.push({ ref: model, requests: 0, lastUsed: at, tokens: 0, usage: emptyUsage(), cost: 0, duration: 0 })
 }
 
 /** Remember a `session.model.selected` event so the replaced model shows up under the current one. */

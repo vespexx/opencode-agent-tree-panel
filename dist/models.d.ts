@@ -42,6 +42,20 @@ export interface SessionLike {
         updated: number;
     };
 }
+/** Tokens of one or more requests, split the way the harness counts them. */
+export interface Usage {
+    input: number;
+    output: number;
+    reasoning: number;
+    cacheRead: number;
+    cacheWrite: number;
+}
+/** A zeroed usage (the starting point for accumulation). */
+export declare function emptyUsage(): Usage;
+/** Split a message's token record into a `Usage`; missing fields count as zero. */
+export declare function usageOf(tokens: TranscriptMessage["tokens"]): Usage;
+/** Add one message's tokens to a running usage. */
+export declare function addUsage(target: Usage, tokens: TranscriptMessage["tokens"]): void;
 /** One model that took part in a session: how many requests it served and what they cost. */
 export interface ModelUse {
     ref: ModelValue;
@@ -51,6 +65,8 @@ export interface ModelUse {
     lastUsed: number;
     /** Tokens (input + output + reasoning + cache) of the requests this model served. */
     tokens: number;
+    /** The same tokens split by kind, so a model the harness could not price can still be estimated. */
+    usage: Usage;
     /** Cost of those requests. */
     cost: number;
     /** Wall-clock time spent answering them. */

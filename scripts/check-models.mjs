@@ -40,6 +40,14 @@ const session = (id, model, updated = 9999) => ({ id, model, time: { updated } }
     JSON.stringify(history.previous))
   check("the replaced model keeps its request count", history.previous[0]?.requests === 1)
   check("the replaced model reports its own tokens", history.previous[0]?.tokens === 115, String(history.previous[0]?.tokens))
+  check(
+    "the replaced model keeps the token breakdown for pricing",
+    history.previous[0]?.usage.input === 10 &&
+      history.previous[0]?.usage.output === 5 &&
+      history.previous[0]?.usage.cacheRead === 100 &&
+      history.previous[0]?.usage.reasoning === 0,
+    JSON.stringify(history.previous[0]?.usage),
+  )
   check("the replaced model reports its own cost", history.previous[0]?.cost === 0.002, String(history.previous[0]?.cost))
   check("the replaced model reports its own time", history.previous[0]?.duration === 600, String(history.previous[0]?.duration))
 }

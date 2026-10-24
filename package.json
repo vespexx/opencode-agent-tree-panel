@@ -1,6 +1,6 @@
 {
   "name": "opencode-agent-tree-panel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Right-sidebar panel showing the agent/sub-agent tree with models, tokens, cost, and current step's tool calls",
   "type": "module",
   "exports": {
