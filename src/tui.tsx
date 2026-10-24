@@ -91,51 +91,26 @@ function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000)
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
-  const rem = s % 60
-  return rem ? `${m}m ${rem}s` : `${m}m`
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `${h}h${m % 60}m` : `${h}h`
 }
 
-/** Status badge component. */
-function StatusBadge(props: { status: "idle" | "running"; variant?: "compact" }) {
-  const ctx = usePlugin()
-  const running = props.status === "running"
-  const dotColor = running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base
-  const label = running ? "running" : "idle"
-
-  if (props.variant === "compact") {
-    return (
-      <box flexDirection="row" gap={1}>
-        <box width={1} height={1} backgroundColor={dotColor} />
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM}>
-          {label}
-        </text>
-      </box>
-    )
-  }
-  return (
-    <box flexDirection="row" gap={1} paddingX={1} paddingY={0} backgroundColor={dotColor + "20"}>
-      <box width={1} height={1} backgroundColor={dotColor} />
-      <text fg={ctx.theme.text.base} selectable={false} attributes={ATTR_DIM}>
-        {label}
-      </text>
-    </box>
-  )
+/** Model rendered as provider/model@variant, tolerant of string and object shapes. */
+function modelText(model?: { id: string; providerID: string; variant?: string } | string): string {
+  if (!model) return "unknown model"
+  if (typeof model === "string") return model
+  const variant = model.variant && model.variant !== "default" ? `@${model.variant}` : ""
+  return `${model.providerID}/${model.id}${variant}`
 }
 
-/** Model display: provider/model. */
-function ModelLabel(props: { model?: { id: string; providerID: string; variant?: string } | string }) {
+/** Status dot: filled while the session is running. */
+function StatusDot(props: { running: boolean }) {
   const ctx = usePlugin()
-  if (!props.model) return <text fg={ctx.theme.text.faint} selectable={false}>—</text>
-  
-  // Handle both object and string formats
-  if (typeof props.model === "string") {
-    return <text fg={ctx.theme.text.base} selectable={false} attributes={ATTR_DIM}>{props.model}</text>
-  }
-  
-  const { providerID, id, variant } = props.model
+  const color = props.running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base
   return (
-    <text fg={ctx.theme.text.base} selectable={false} attributes={ATTR_DIM}>
-      {providerID}/{id}{variant ? `@${variant}` : ""}
+    <text fg={color} selectable={false} flexShrink={0}>
+      {props.running ? "●" : "○"}
     </text>
   )
 }
@@ -249,38 +224,60 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
   const ctx = usePlugin()
   const session = node.session
   const status = statuses.get(session.id) ?? "idle"
+  const running = status === "running"
   const tokens = totalTokens(session.tokens)
   const duration = elapsed(session, status)
   const hasChildren = node.children.length > 0
 
-  const prefix = "  ".repeat(node.depth) + (node.depth > 0 ? "└─ " : "")
   const agentName = session.agent ?? "default"
 
   return (
-    <box flexDirection="column" gap={0}>
+    <box flexDirection="column" gap={0} marginLeft={node.depth * 2}>
+      {/* Line 1: status + agent name, duration on the right (never shrinks). */}
       <box flexDirection="row" gap={1} height={1}>
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM}>
-          {prefix}
-        </text>
-        <text fg={ctx.theme.text.base} selectable={false} attributes={node.depth === 0 ? ATTR_BOLD : 0}>
+        <StatusDot running={running} />
+        <text
+          fg={ctx.theme.text.base}
+          selectable={false}
+          attributes={node.depth === 0 ? ATTR_BOLD : 0}
+          wrapMode="none"
+          truncate
+          flexShrink={1}
+        >
           {agentName}
         </text>
         <box flexGrow={1} />
-        <ModelLabel model={session.model} />
-        <box width={1} />
-        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} width={8}>
-          {fmtTokens(tokens)}
-        </text>
-        <box width={1} />
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} width={7}>
-          {fmtCost(session.cost)}
-        </text>
-        <box width={1} />
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} width={6}>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
           {fmtDuration(duration)}
         </text>
-        <box width={1} />
-        <StatusBadge status={status} variant="compact" />
+      </box>
+
+      {/* Line 2: model (truncates), tokens and cost pinned to the right. */}
+      <box flexDirection="row" gap={1} height={1} paddingLeft={2}>
+        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
+          {modelText(session.model)}
+        </text>
+        <box flexGrow={1} />
+        <text
+          fg={ctx.theme.text.faint}
+          selectable={false}
+          attributes={ATTR_DIM}
+          width={6}
+          flexShrink={0}
+          textAlign="right"
+        >
+          {fmtTokens(tokens)}
+        </text>
+        <text
+          fg={ctx.theme.text.faint}
+          selectable={false}
+          attributes={ATTR_DIM}
+          width={7}
+          flexShrink={0}
+          textAlign="right"
+        >
+          {fmtCost(session.cost)}
+        </text>
       </box>
 
       <Show when={hasChildren}>

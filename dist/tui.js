@@ -51,31 +51,25 @@ function fmtDuration(ms) {
     if (s < 60)
         return `${s}s`;
     const m = Math.floor(s / 60);
-    const rem = s % 60;
-    return rem ? `${m}m ${rem}s` : `${m}m`;
+    if (m < 60)
+        return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
 }
-/** Status badge component. */
-function StatusBadge(props) {
-    const ctx = usePlugin();
-    const running = props.status === "running";
-    const dotColor = running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base;
-    const label = running ? "running" : "idle";
-    if (props.variant === "compact") {
-        return (_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("box", { width: 1, height: 1, backgroundColor: dotColor }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: label })] }));
-    }
-    return (_jsxs("box", { flexDirection: "row", gap: 1, paddingX: 1, paddingY: 0, backgroundColor: dotColor + "20", children: [_jsx("box", { width: 1, height: 1, backgroundColor: dotColor }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_DIM, children: label })] }));
+/** Model rendered as provider/model@variant, tolerant of string and object shapes. */
+function modelText(model) {
+    if (!model)
+        return "unknown model";
+    if (typeof model === "string")
+        return model;
+    const variant = model.variant && model.variant !== "default" ? `@${model.variant}` : "";
+    return `${model.providerID}/${model.id}${variant}`;
 }
-/** Model display: provider/model. */
-function ModelLabel(props) {
+/** Status dot: filled while the session is running. */
+function StatusDot(props) {
     const ctx = usePlugin();
-    if (!props.model)
-        return _jsx("text", { fg: ctx.theme.text.faint, selectable: false, children: "\u2014" });
-    // Handle both object and string formats
-    if (typeof props.model === "string") {
-        return _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_DIM, children: props.model });
-    }
-    const { providerID, id, variant } = props.model;
-    return (_jsxs("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_DIM, children: [providerID, "/", id, variant ? `@${variant}` : ""] }));
+    const color = props.running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base;
+    return (_jsx("text", { fg: color, selectable: false, flexShrink: 0, children: props.running ? "●" : "○" }));
 }
 /** Recursive tree builder from flat family list. */
 function buildTree(sessionIDs, getSession) {
@@ -149,12 +143,12 @@ function AgentTreeNode(props) {
     const ctx = usePlugin();
     const session = node.session;
     const status = statuses.get(session.id) ?? "idle";
+    const running = status === "running";
     const tokens = totalTokens(session.tokens);
     const duration = elapsed(session, status);
     const hasChildren = node.children.length > 0;
-    const prefix = "  ".repeat(node.depth) + (node.depth > 0 ? "└─ " : "");
     const agentName = session.agent ?? "default";
-    return (_jsxs("box", { flexDirection: "column", gap: 0, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: prefix }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, children: agentName }), _jsx("box", { flexGrow: 1 }), _jsx(ModelLabel, { model: session.model }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, width: 8, children: fmtTokens(tokens) }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 7, children: fmtCost(session.cost) }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) }), _jsx("box", { width: 1 }), _jsx(StatusBadge, { status: status, variant: "compact" })] }), _jsx(Show, { when: hasChildren, children: _jsx(For, { each: node.children, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses }) }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: node.depth * 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "row", gap: 1, height: 1, paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: modelText(session.model) }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, flexShrink: 0, textAlign: "right", children: fmtTokens(tokens) }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 7, flexShrink: 0, textAlign: "right", children: fmtCost(session.cost) })] }), _jsx(Show, { when: hasChildren, children: _jsx(For, { each: node.children, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses }) }) })] }));
 }
 /** Tools section showing current step's tool calls. */
 function ToolsSection(props) {
