@@ -3,21 +3,27 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { RGBA } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
 import {
+  estimateCost,
   getLiteLLMData,
   lookupAlias,
+  lookupPricing,
   extractAlias,
   type LiteLLMData,
+  type ModelPricing,
   type ProviderInfoLike,
 } from "./litellm"
 import {
   MAX_PREVIOUS_MODELS,
   cachedModelHistory,
+  emptyUsage,
   modelKey,
   modelText,
   recordModelSwitch,
+  usageOf,
   type ModelUse,
   type ModelValue,
   type TranscriptMessage,
+  type Usage,
 } from "./models"
 import { readServed, servedSummary, type ServedRecord } from "./served"
 
@@ -113,6 +119,53 @@ function fmtDuration(ms: number): string {
   if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
   const h = Math.floor(m / 60)
   return m % 60 ? `${h}h${m % 60}m` : `${h}h`
+}
+
+/** A per-token rate as USD per million tokens, the unit prices are usually compared in. */
+function fmtRate(perToken: number): string {
+  const perMillion = perToken * 1_000_000
+  if (!Number.isFinite(perMillion) || perMillion <= 0) return "$0"
+  if (perMillion >= 0.1) return `$${perMillion.toFixed(2)}`
+  if (perMillion >= 0.001) return `$${perMillion.toFixed(3)}`
+  return `$${perMillion.toFixed(4)}`
+}
+
+/** Money shown for one model or session: the reported cost, or an estimate at LiteLLM prices. */
+interface Spend {
+  cost: number
+  /** True when the number was computed from published rates instead of reported by the harness. */
+  estimated: boolean
+}
+
+/**
+ * Cost of some tokens, preferring the number OpenCode reported.
+ *
+ * OpenCode prices a model only when it knows the id (its model registry); a locally defined LiteLLM alias is unknown to
+ * it, so every message of such a model comes back with `cost: 0` even though the proxy charges for it. In that case the
+ * panel prices the tokens itself from `/model/info` — at the highest published rate, so the number is an upper bound.
+ */
+function spendOf(reported: number, usage: Usage, pricing: ModelPricing | undefined): Spend {
+  if (reported > 0) return { cost: reported, estimated: false }
+  const estimate = estimateCost(pricing, usage)
+  return estimate && estimate > 0 ? { cost: estimate, estimated: true } : { cost: reported, estimated: false }
+}
+
+/** Sum of several spends; the total is an estimate when any part of it is. */
+function sumSpend(spends: Spend[]): Spend {
+  return { cost: spends.reduce((sum, spend) => sum + spend.cost, 0), estimated: spends.some((spend) => spend.estimated) }
+}
+
+function fmtSpend(spend: Spend): string {
+  return `${spend.estimated ? "≈ " : ""}${fmtCost(spend.cost)}`
+}
+
+/** Add one token breakdown into another (in place). */
+function mergeUsage(target: Usage, source: Usage): void {
+  target.input += source.input
+  target.output += source.output
+  target.reasoning += source.reasoning
+  target.cacheRead += source.cacheRead
+  target.cacheWrite += source.cacheWrite
 }
 
 /** Status dot: filled while the session is running. */
@@ -225,9 +278,18 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
     // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
     const modelID = modelKey(session.model)
     if (session.model && modelID) {
-      const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 }
+      const use = bucket.models.get(modelID) ?? {
+        ref: session.model,
+        requests: 0,
+        lastUsed: 0,
+        tokens: 0,
+        usage: emptyUsage(),
+        cost: 0,
+        duration: 0,
+      }
       use.requests += 1
       use.tokens += totalTokens(session.tokens)
+      mergeUsage(use.usage, usageOf(session.tokens))
       use.cost += session.cost
       use.duration += elapsed(session, "idle")
       use.lastUsed = Math.max(use.lastUsed, session.time.updated)
@@ -261,17 +323,21 @@ function PastModels(props: { models: ModelUse[]; llm: LiteLLMData; sessionID?: s
       ? servedSummary(props.served ?? [], props.sessionID, use.ref, extractAlias(use.ref), props.llm.deployments)
       : undefined
 
+  const spendOfUse = (use: ModelUse) =>
+    spendOf(use.cost, use.usage, lookupPricing(props.llm, extractAlias(use.ref), summaryOf(use)?.servedID))
+
   return (
     <>
       <For each={shown()}>
         {(use) => {
           const summary = () => summaryOf(use)
+          const spend = () => spendOfUse(use)
           return (
             <>
               <Show when={use.tokens > 0 || use.cost > 0 || use.duration > 0}>
                 {/* Spent while this model was in charge; the arrow points at the model on the next line. */}
                 <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-                  ↓ {fmtTokens(use.tokens)} tok · {fmtCost(use.cost)} · {fmtDuration(use.duration)}
+                  ↓ {fmtTokens(use.tokens)} tok · {fmtSpend(spend())} · {fmtDuration(use.duration)}
                 </text>
               </Show>
               <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
@@ -308,6 +374,14 @@ function AgentGroupRow(props: { group: AgentGroup; llm: LiteLLMData }) {
   const alias = current ? extractAlias(current.ref) : undefined
   const upstream = alias ? lookupAlias(props.llm.aliases, alias) : undefined
 
+  // A group spans several sessions, so each of its models is priced on its own and the parts are added up.
+  const groupSpend = () =>
+    group.models.length === 0
+      ? { cost: group.cost, estimated: false }
+      : sumSpend(
+          group.models.map((use) => spendOf(use.cost, use.usage, lookupPricing(props.llm, extractAlias(use.ref)))),
+        )
+
   return (
     <box flexDirection="column" gap={0} marginLeft={2}>
       <box flexDirection="row" gap={1} height={1}>
@@ -336,7 +410,7 @@ function AgentGroupRow(props: { group: AgentGroup; llm: LiteLLMData }) {
         })()}
         <PastModels models={group.models.slice(1)} llm={props.llm} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          group total · {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
+          group total · {fmtTokens(group.tokens)} tok · {fmtSpend(groupSpend())}
         </text>
       </box>
     </box>
@@ -432,6 +506,9 @@ function AgentTreeNode(props: {
   // What LiteLLM actually served for the model in effect (from the response headers, via the server hook).
   const summary = servedSummary(served, session.id, history.current ?? session.model, alias, llm.deployments)
   const servedID = summary?.servedID?.slice(0, 8)
+  // Prices of the deployment that answered (or of the alias), used when the harness itself reported no cost.
+  const pricing = lookupPricing(llm, alias, summary?.servedID)
+  const spend = spendOf(session.cost, usageOf(session.tokens), pricing)
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -484,8 +561,15 @@ function AgentTreeNode(props: {
         </Show>
         <PastModels models={history.previous} llm={llm} sessionID={session.id} served={served} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          session total · {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
+          session total · {fmtTokens(tokens)} tok · {fmtSpend(spend)}
         </text>
+        {/* The price behind an estimate, so a "$0.00 → ≈ $0.36" change explains itself. */}
+        <Show when={spend.estimated && kind === "primary" && pricing}>
+          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+            ≈ litellm max price · in {fmtRate(pricing!.input)}/M · out {fmtRate(pricing!.output)}/M · cache{" "}
+            {fmtRate(pricing!.cacheRead)}/M
+          </text>
+        </Show>
       </box>
 
       {/* Live sub-agents in full detail, finished ones rolled up per agent. */}
@@ -682,7 +766,12 @@ function Panel(props: { sessionID: string }) {
   const ctx = usePlugin()
   const [tick, setTick] = createSignal(0)
   const [failed, setFailed] = createSignal(false)
-  const [llm, setLlm] = createSignal<LiteLLMData>({ aliases: new Map(), deployments: new Map() })
+  const [llm, setLlm] = createSignal<LiteLLMData>({
+    aliases: new Map(),
+    deployments: new Map(),
+    pricing: new Map(),
+    aliasPricing: new Map(),
+  })
   const [aliasLoading, setAliasLoading] = createSignal(false)
 
   // Load alias + deployment maps on first mount
