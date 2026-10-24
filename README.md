@@ -80,8 +80,9 @@ Add to your `~/.config/opencode/opencode.json`:
 Restart OpenCode TUI. The panel appears in the right sidebar (same slot as the Context panel).
 
 The plugin has two entrypoints: `index.js` (server: the `http.response` hook that records which LiteLLM deployment
-answered) and `tui.js` (the panel). A TUI-only reload is enough for styling changes, but the served-deployment log needs
-a full OpenCode restart so the server entry is loaded.
+answered) and `tui.js` (the panel). On this build the server loads the entry per request, so a fresh build starts
+writing the served-deployment log with the next request; restart OpenCode if the log stays empty after a few turns. The
+TUI half picks up rendering changes on a TUI reload.
 
 ## LiteLLM upstream model resolution
 
@@ -218,8 +219,8 @@ Limits worth knowing:
 - The client keeps roughly the last 20 messages per session, so on mount the panel can only show the switches still in
   that window; everything it observes afterwards is remembered for the lifetime of the panel. Per-model tokens, cost and
   time therefore cover the loaded window, while the `session total` line is the session's real total.
-- Served-deployment data starts when the server entry is loaded (an OpenCode restart after installing the plugin); it
-  cannot be reconstructed from older transcripts. The log keeps the newest ~300 responses, 256 KB at most.
+- Served-deployment data starts with the first request handled after the server entry is on disk; it cannot be
+  reconstructed from older transcripts. The log keeps the newest ~300 responses, 256 KB at most.
 - The server and the TUI must run on the same machine: the hook writes
   `~/.local/share/opencode/agent-tree-panel/served.jsonl`, the panel reads it. `AGENT_TREE_PANEL_DIR` overrides the path
   (used by the checks).
