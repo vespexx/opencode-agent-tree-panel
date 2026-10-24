@@ -58,7 +58,7 @@ function fmtDuration(ms) {
 function StatusBadge(props) {
     const ctx = usePlugin();
     const running = props.status === "running";
-    const dotColor = running ? ctx.theme.status.success : ctx.theme.status.info;
+    const dotColor = running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base;
     const label = running ? "running" : "idle";
     if (props.variant === "compact") {
         return (_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("box", { width: 1, height: 1, backgroundColor: dotColor }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: label })] }));
@@ -194,16 +194,16 @@ function ToolRow(props) {
     if (!time.ran && time.created)
         duration = Date.now() - time.created;
     const statusColor = error
-        ? ctx.theme.status.error
+        ? ctx.theme.text.feedback.error.base
         : running
-            ? ctx.theme.status.warning
+            ? ctx.theme.text.feedback.warning.base
             : completed
-                ? ctx.theme.status.success
+                ? ctx.theme.text.feedback.success.base
                 : ctx.theme.text.faint;
     const statusLabel = error ? "error" : running ? "running" : completed ? "done" : "pending";
     // Use a colored left border via a thin box
     const leftBorder = _jsx("box", { width: 1, backgroundColor: statusColor + "80", height: 1 });
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.status.error, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content[0]?.text?.slice(0, 120) ?? "error" }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content[0]?.text?.slice(0, 120) ?? "error" }) })] }));
 }
 /** Main panel component. */
 function Panel(props) {
@@ -276,7 +276,7 @@ function Panel(props) {
     onMount(() => {
         void ctx.data.session.sync(props.sessionID);
     });
-    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.status.error, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick() }), _jsx("box", { height: 1, backgroundColor: ctx.theme.border.base }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick() }), _jsx("box", { height: 1, backgroundColor: ctx.theme.border.base }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
 }
 /** Plugin definition. */
 export default Plugin.define({

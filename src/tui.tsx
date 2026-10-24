@@ -99,7 +99,7 @@ function fmtDuration(ms: number): string {
 function StatusBadge(props: { status: "idle" | "running"; variant?: "compact" }) {
   const ctx = usePlugin()
   const running = props.status === "running"
-  const dotColor = running ? ctx.theme.status.success : ctx.theme.status.info
+  const dotColor = running ? ctx.theme.text.feedback.success.base : ctx.theme.text.feedback.info.base
   const label = running ? "running" : "idle"
 
   if (props.variant === "compact") {
@@ -361,11 +361,11 @@ function ToolRow(props: { tool: ToolPart }) {
   if (!time.ran && time.created) duration = Date.now() - time.created
 
   const statusColor = error
-    ? ctx.theme.status.error
+    ? ctx.theme.text.feedback.error.base
     : running
-    ? ctx.theme.status.warning
+    ? ctx.theme.text.feedback.warning.base
     : completed
-    ? ctx.theme.status.success
+    ? ctx.theme.text.feedback.success.base
     : ctx.theme.text.faint
 
   const statusLabel = error ? "error" : running ? "running" : completed ? "done" : "pending"
@@ -400,7 +400,7 @@ function ToolRow(props: { tool: ToolPart }) {
       </Show>
 
       <Show when={error && state.content && state.content.length > 0}>
-        <text fg={ctx.theme.status.error} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="none">
+        <text fg={ctx.theme.text.feedback.error.base} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="none">
           {state.content![0]?.text?.slice(0, 120) ?? "error"}
         </text>
       </Show>
@@ -488,7 +488,7 @@ function Panel(props: { sessionID: string }) {
   return (
     <box flexDirection="column" gap={1} padding={1}>
       <Show when={failed()}>
-        <text fg={ctx.theme.status.error} selectable={false}>
+        <text fg={ctx.theme.text.feedback.error.base} selectable={false}>
           Failed to load session data
         </text>
       </Show>
