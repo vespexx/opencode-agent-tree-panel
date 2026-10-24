@@ -230,10 +230,11 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
   const hasChildren = node.children.length > 0
 
   const agentName = session.agent ?? "default"
+  const kind = session.parentID ? "sub" : "primary"
 
   return (
     <box flexDirection="column" gap={0} marginLeft={node.depth * 2}>
-      {/* Line 1: status + agent name, duration on the right (never shrinks). */}
+      {/* Line 1: status + agent name + kind, duration on the right (never shrinks). */}
       <box flexDirection="row" gap={1} height={1}>
         <StatusDot running={running} />
         <text
@@ -246,37 +247,22 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
         >
           {agentName}
         </text>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+          · {kind}
+        </text>
         <box flexGrow={1} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
           {fmtDuration(duration)}
         </text>
       </box>
 
-      {/* Line 2: model (truncates), tokens and cost pinned to the right. */}
-      <box flexDirection="row" gap={1} height={1} paddingLeft={2}>
-        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
+      {/* Line 2: the model wraps on its own line so long names stay readable. */}
+      <box flexDirection="column" paddingLeft={2}>
+        <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {modelText(session.model)}
         </text>
-        <box flexGrow={1} />
-        <text
-          fg={ctx.theme.text.faint}
-          selectable={false}
-          attributes={ATTR_DIM}
-          width={6}
-          flexShrink={0}
-          textAlign="right"
-        >
-          {fmtTokens(tokens)}
-        </text>
-        <text
-          fg={ctx.theme.text.faint}
-          selectable={false}
-          attributes={ATTR_DIM}
-          width={7}
-          flexShrink={0}
-          textAlign="right"
-        >
-          {fmtCost(session.cost)}
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+          {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
         </text>
       </box>
 
