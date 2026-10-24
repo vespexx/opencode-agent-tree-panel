@@ -25,13 +25,23 @@ const session = (id, model, updated = 9999) => ({ id, model, time: { updated } }
 {
   forgetSession("s-mid")
   const history = readModelHistory(session("s-mid", B), [
-    { id: "m1", type: "assistant", model: A, time: { created: 1000, completed: 1100 } },
+    {
+      id: "m1",
+      type: "assistant",
+      model: A,
+      time: { created: 1000, completed: 1600 },
+      cost: 0.002,
+      tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 100, write: 0 } },
+    },
     { id: "m2", type: "model-switched", model: B, previous: A, time: { created: 2000 } },
   ])
   check("mid-request fallback keeps the current model", history.current === B)
   check("mid-request fallback lists the replaced model", history.previous.length === 1 && history.previous[0].ref === A,
     JSON.stringify(history.previous))
   check("the replaced model keeps its request count", history.previous[0]?.requests === 1)
+  check("the replaced model reports its own tokens", history.previous[0]?.tokens === 115, String(history.previous[0]?.tokens))
+  check("the replaced model reports its own cost", history.previous[0]?.cost === 0.002, String(history.previous[0]?.cost))
+  check("the replaced model reports its own time", history.previous[0]?.duration === 600, String(history.previous[0]?.duration))
 }
 
 // 2. Two user switches between requests: A -> B -> A. A is current again, B is the only past model.
@@ -89,16 +99,32 @@ try {
     ).reverse()
     const messages = rows
       .map((entry) => ({ id: String(entry.data).slice(0, 24), type: entry.type, ...JSON.parse(entry.data) }))
-      .map((entry) => ({ id: entry.id, type: entry.type, model: entry.model, previous: entry.previous, time: entry.time }))
+      .map((entry) => ({
+        id: entry.id,
+        type: entry.type,
+        model: entry.model,
+        previous: entry.previous,
+        time: entry.time,
+        cost: entry.cost,
+        tokens: entry.tokens,
+      }))
     const model = row?.model ? JSON.parse(row.model) : undefined
     forgetSession(worst.session_id)
     const history = readModelHistory(session(worst.session_id, model), messages)
     check("real session: current model matches the session record", Boolean(model) && history.current === model,
       `db=${JSON.stringify(model)} history=${JSON.stringify(history.current)}`)
+    check("real session: the replaced model has usage attached",
+      history.previous.every((use) => use.tokens > 0 && use.duration > 0),
+      JSON.stringify(history.previous))
     console.log(
       `real session ${worst.session_id} (${worst.switches} switches, window ${messages.length} messages):\n` +
-        `  current: ${JSON.stringify(history.current)}\n` +
-        history.previous.map((use) => `  past:    ${JSON.stringify(use.ref)} ×${use.requests}`).join("\n"),
+        `  current: ${JSON.stringify(history.current)} (session totals ${history.previous.length} other models)\n` +
+        history.previous
+          .map(
+            (use) =>
+              `  past:    ${JSON.stringify(use.ref)} ×${use.requests} — ${use.tokens} tok, $${use.cost}, ${use.duration}ms`,
+          )
+          .join("\n"),
     )
   }
 } catch (error) {

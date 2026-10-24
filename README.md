@@ -127,6 +127,7 @@ The panel appears in the right sidebar:
 │ ● build · primary                             14h 48m │
 │   litellm/deepseek-v4-flash-cloud-deepseek            │
 │   → deepseek/deepseek-v4-flash                        │
+│   ↓ 1.2M tok · $0.18 · 38m                            │
 │   ↳ litellm/deepseek-v4.1-flash-free ×7               │
 │   ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2           │
 │   33.1M tok · $0.00                                   │
@@ -159,6 +160,7 @@ it replaced underneath, so a fallback is visible instead of silently rewriting h
 build · primary                                  14h 48m
   litellm/deepseek-v4-flash-cloud-deepseek
   → deepseek/deepseek-v4-flash
+  ↓ 1.2M tok · $0.18 · 38m                   ← spent on the model below
   ↳ litellm/deepseek-v4.1-flash-free ×7      ← served 7 requests before the fallback
   ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2
 ```
@@ -167,15 +169,16 @@ Where the history comes from:
 
 - `model-switched` transcript entries (the harness writes one per change, with `previous`). Both a `session.switchModel`
   fallback in the middle of a request and a model picked between requests produce one.
-- `model` of every assistant message, so the request count per model is real even when the switch entry is older than
-  the loaded transcript window.
+- `model` of every assistant message, so the request count and the tokens/cost/time spent per model are real even when
+  the switch entry is older than the loaded transcript window.
 - `session.model.selected` events seen while the panel is open, which also covers sub-agent sessions (their transcripts
   are not loaded by the panel at all).
 
 Limits worth knowing:
 
 - The client keeps roughly the last 20 messages per session, so on mount the panel can only show the switches still in
-  that window; everything it observes afterwards is remembered for the lifetime of the panel.
+  that window; everything it observes afterwards is remembered for the lifetime of the panel. Per-model tokens, cost and
+  time therefore cover the loaded window, while the last line under an agent is the session's real total.
 - A fallback *inside* one LiteLLM alias (LiteLLM router picking another deployment) is invisible here: the harness still
   records the alias, not the deployment that answered. The `→ upstream` line is the statically resolved alias target.
 - At most 3 past models are listed; the rest collapse into `↳ +N earlier`.

@@ -224,8 +224,11 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
     // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
     const modelID = modelKey(session.model)
     if (session.model && modelID) {
-      const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0 }
+      const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 }
       use.requests += 1
+      use.tokens += totalTokens(session.tokens)
+      use.cost += session.cost
+      use.duration += elapsed(session, "idle")
       use.lastUsed = Math.max(use.lastUsed, session.time.updated)
       bucket.models.set(modelID, use)
     }
@@ -242,7 +245,7 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
   return { running, groups, finishedTotal: finished.length }
 }
 
-/** Past models of a session or group: dimmed under the current one, newest first. */
+/** Past models of a session or group: what each one spent, then the model itself, dimmed under the current one. */
 function PastModels(props: { models: ModelUse[] }) {
   const ctx = usePlugin()
   const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS)
@@ -252,10 +255,18 @@ function PastModels(props: { models: ModelUse[] }) {
     <>
       <For each={shown()}>
         {(use) => (
-          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-            ↳ {modelText(use.ref)}
-            {use.requests > 0 ? ` ×${use.requests}` : ""}
-          </text>
+          <>
+            <Show when={use.tokens > 0 || use.cost > 0 || use.duration > 0}>
+              {/* Spent while this model was in charge; the arrow points at the model on the next line. */}
+              <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+                ↓ {fmtTokens(use.tokens)} tok · {fmtCost(use.cost)} · {fmtDuration(use.duration)}
+              </text>
+            </Show>
+            <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+              ↳ {modelText(use.ref)}
+              {use.requests > 0 ? ` ×${use.requests}` : ""}
+            </text>
+          </>
         )}
       </For>
       <Show when={hidden() > 0}>

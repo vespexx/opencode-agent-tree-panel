@@ -139,8 +139,11 @@ function splitChildren(nodes, statuses) {
         // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
         const modelID = modelKey(session.model);
         if (session.model && modelID) {
-            const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0 };
+            const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 };
             use.requests += 1;
+            use.tokens += totalTokens(session.tokens);
+            use.cost += session.cost;
+            use.duration += elapsed(session, "idle");
             use.lastUsed = Math.max(use.lastUsed, session.time.updated);
             bucket.models.set(modelID, use);
         }
@@ -154,12 +157,12 @@ function splitChildren(nodes, statuses) {
         .sort((a, b) => b.updated - a.updated);
     return { running, groups, finishedTotal: finished.length };
 }
-/** Past models of a session or group: dimmed under the current one, newest first. */
+/** Past models of a session or group: what each one spent, then the model itself, dimmed under the current one. */
 function PastModels(props) {
     const ctx = usePlugin();
     const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS);
     const hidden = () => Math.max(0, props.models.length - shown().length);
-    return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => (_jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] })) }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
+    return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => (_jsxs(_Fragment, { children: [_jsx(Show, { when: use.tokens > 0 || use.cost > 0 || use.duration > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2193 ", fmtTokens(use.tokens), " tok \u00B7 ", fmtCost(use.cost), " \u00B7 ", fmtDuration(use.duration)] }) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] })] })) }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
 }
 /** Completed runs of one agent, rolled into a three-line block with totals. */
 function AgentGroupRow(props) {

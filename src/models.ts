@@ -17,6 +17,8 @@ export interface TranscriptMessage {
   model?: ModelValue
   previous?: ModelValue
   time?: { created?: number; streamed?: number; completed?: number }
+  cost?: number
+  tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
 }
 
 /** The session fields used here: identity, the current model and the last update timestamp. */
@@ -26,13 +28,19 @@ export interface SessionLike {
   time: { updated: number }
 }
 
-/** One model that took part in a session: how many requests it served and when it was last seen. */
+/** One model that took part in a session: how many requests it served and what they cost. */
 export interface ModelUse {
   ref: ModelValue
   /** Assistant messages attributed to this model (0 when it is known only from a model switch). */
   requests: number
   /** Timestamp of the newest switch or request that involved it. */
   lastUsed: number
+  /** Tokens (input + output + reasoning + cache) of the requests this model served. */
+  tokens: number
+  /** Cost of those requests. */
+  cost: number
+  /** Wall-clock time spent answering them. */
+  duration: number
 }
 
 /** The model in effect on top, the ones used before it below, newest first. */
@@ -60,19 +68,31 @@ export function modelKey(model?: ModelValue): string | undefined {
   return `${model.providerID}/${model.id}${variant}`
 }
 
+/** Total tokens of a usage record (input + output + reasoning + cache). */
+export function usageTokens(tokens: TranscriptMessage["tokens"]): number {
+  if (!tokens) return 0
+  return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+}
+
 /** Rebuild a session's model history from its transcript. */
 export function readModelHistory(session: SessionLike, messages: TranscriptMessage[]): ModelHistory {
   const uses = new Map<string, ModelUse>()
 
-  const note = (model: ModelValue | undefined, at: number, request: boolean) => {
+  const note = (model: ModelValue | undefined, at: number, request?: TranscriptMessage) => {
     const key = modelKey(model)
     if (!key || !model) return
     let use = uses.get(key)
     if (!use) {
-      use = { ref: model, requests: 0, lastUsed: 0 }
+      use = { ref: model, requests: 0, lastUsed: 0, tokens: 0, cost: 0, duration: 0 }
       uses.set(key, use)
     }
-    if (request) use.requests += 1
+    if (request) {
+      use.requests += 1
+      use.tokens += usageTokens(request.tokens)
+      use.cost += request.cost ?? 0
+      const { created, completed } = request.time ?? {}
+      if (created && completed && completed > created) use.duration += completed - created
+    }
     if (Number.isFinite(at) && at > use.lastUsed) use.lastUsed = at
   }
 
@@ -80,10 +100,10 @@ export function readModelHistory(session: SessionLike, messages: TranscriptMessa
     if (message.type === "model-switched") {
       const at = message.time?.created ?? 0
       // The model that was left belongs in the history too, even when nothing else recorded it.
-      note(message.previous, Math.max(0, at - 1), false)
-      note(message.model, at, false)
+      note(message.previous, Math.max(0, at - 1))
+      note(message.model, at)
     } else if (message.type === "assistant") {
-      note(message.model, message.time?.completed ?? message.time?.created ?? 0, true)
+      note(message.model, message.time?.completed ?? message.time?.created ?? 0, message)
     }
   }
 
@@ -110,7 +130,7 @@ function noteLiveModel(entries: ModelUse[], model: ModelValue, at: number) {
     existing.lastUsed = Math.max(existing.lastUsed, at)
     return
   }
-  entries.push({ ref: model, requests: 0, lastUsed: at })
+  entries.push({ ref: model, requests: 0, lastUsed: at, tokens: 0, cost: 0, duration: 0 })
 }
 
 /** Remember a `session.model.selected` event so the replaced model shows up under the current one. */

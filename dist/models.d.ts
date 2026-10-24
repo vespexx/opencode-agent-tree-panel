@@ -23,6 +23,16 @@ export interface TranscriptMessage {
         streamed?: number;
         completed?: number;
     };
+    cost?: number;
+    tokens?: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache: {
+            read: number;
+            write: number;
+        };
+    };
 }
 /** The session fields used here: identity, the current model and the last update timestamp. */
 export interface SessionLike {
@@ -32,13 +42,19 @@ export interface SessionLike {
         updated: number;
     };
 }
-/** One model that took part in a session: how many requests it served and when it was last seen. */
+/** One model that took part in a session: how many requests it served and what they cost. */
 export interface ModelUse {
     ref: ModelValue;
     /** Assistant messages attributed to this model (0 when it is known only from a model switch). */
     requests: number;
     /** Timestamp of the newest switch or request that involved it. */
     lastUsed: number;
+    /** Tokens (input + output + reasoning + cache) of the requests this model served. */
+    tokens: number;
+    /** Cost of those requests. */
+    cost: number;
+    /** Wall-clock time spent answering them. */
+    duration: number;
 }
 /** The model in effect on top, the ones used before it below, newest first. */
 export interface ModelHistory {
@@ -51,6 +67,8 @@ export declare const MAX_PREVIOUS_MODELS = 3;
 export declare function modelText(model?: ModelValue): string;
 /** Stable identity of a model reference (variant included). */
 export declare function modelKey(model?: ModelValue): string | undefined;
+/** Total tokens of a usage record (input + output + reasoning + cache). */
+export declare function usageTokens(tokens: TranscriptMessage["tokens"]): number;
 /** Rebuild a session's model history from its transcript. */
 export declare function readModelHistory(session: SessionLike, messages: TranscriptMessage[]): ModelHistory;
 /** Remember a `session.model.selected` event so the replaced model shows up under the current one. */
