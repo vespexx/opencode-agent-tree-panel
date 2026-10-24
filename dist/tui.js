@@ -2,8 +2,9 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "@opentui/soli
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { estimateCost, getLiteLLMData, lookupAlias, lookupPricing, extractAlias, } from "./litellm";
-import { MAX_PREVIOUS_MODELS, cachedModelHistory, emptyUsage, modelKey, modelText, recordModelSwitch, usageOf, } from "./models";
+import { getLiteLLMData, lookupAlias, lookupPricing, extractAlias, } from "./litellm";
+import { MAX_PREVIOUS_MODELS, cachedModelHistory, emptyUsage, mergeUsage, modelKey, modelText, recordModelSwitch, usageOf, } from "./models";
+import { fmtDuration, fmtSpend, fmtTokens, rateLine, spendOf, sumSpend } from "./format";
 import { readServed, servedSummary } from "./served";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -30,74 +31,6 @@ const ATTR_BOLD = 1;
 const ATTR_DIM = 2;
 const ATTR_ITALIC = 3;
 const ATTR_UNDERLINE = 4;
-/** Display format helpers. */
-function fmtTokens(value) {
-    if (!Number.isFinite(value) || value <= 0)
-        return "0";
-    if (value >= 1_000_000)
-        return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-    if (value >= 1_000)
-        return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-    return String(Math.round(value));
-}
-function fmtCost(value) {
-    if (!Number.isFinite(value) || value === 0)
-        return "$0.00";
-    if (value < 0.01)
-        return `$${value.toFixed(4)}`;
-    return `$${value.toFixed(2)}`;
-}
-function fmtDuration(ms) {
-    if (ms < 1000)
-        return `${ms}ms`;
-    const s = Math.round(ms / 1000);
-    if (s < 60)
-        return `${s}s`;
-    const m = Math.floor(s / 60);
-    if (m < 60)
-        return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
-    const h = Math.floor(m / 60);
-    return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
-}
-/** A per-token rate as USD per million tokens, the unit prices are usually compared in. */
-function fmtRate(perToken) {
-    const perMillion = perToken * 1_000_000;
-    if (!Number.isFinite(perMillion) || perMillion <= 0)
-        return "$0";
-    if (perMillion >= 0.1)
-        return `$${perMillion.toFixed(2)}`;
-    if (perMillion >= 0.001)
-        return `$${perMillion.toFixed(3)}`;
-    return `$${perMillion.toFixed(4)}`;
-}
-/**
- * Cost of some tokens, preferring the number OpenCode reported.
- *
- * OpenCode prices a model only when it knows the id (its model registry); a locally defined LiteLLM alias is unknown to
- * it, so every message of such a model comes back with `cost: 0` even though the proxy charges for it. In that case the
- * panel prices the tokens itself from `/model/info` — at the highest published rate, so the number is an upper bound.
- */
-function spendOf(reported, usage, pricing) {
-    if (reported > 0)
-        return { cost: reported, estimated: false };
-    const estimate = estimateCost(pricing, usage);
-    return estimate && estimate > 0 ? { cost: estimate, estimated: true } : { cost: reported, estimated: false };
-}
-/** Sum of several spends; the total is an estimate when any part of it is. */
-function sumSpend(spends) {
-    return { cost: spends.reduce((sum, spend) => sum + spend.cost, 0), estimated: spends.some((spend) => spend.estimated) };
-}
-function fmtSpend(spend) {
-    return `${spend.estimated ? "≈ " : ""}${fmtCost(spend.cost)}`;
-}
-/** Add one token breakdown into another (in place). */
-function mergeUsage(target, source) {
-    target.input += source.input;
-    target.output += source.output;
-    target.reasoning += source.reasoning;
-    target.cacheRead += source.cacheRead;
-    target.cacheWrite += source.cacheWrite;
-}
 /** Status dot: filled while the session is running. */
 function StatusDot(props) {
     const ctx = usePlugin();
@@ -297,6 +230,8 @@ function AgentTreeNode(props) {
     // Prices of the deployment that answered (or of the alias), used when the harness itself reported no cost.
     const pricing = lookupPricing(llm, alias, summary?.servedID);
     const spend = spendOf(session.cost, usageOf(session.tokens), pricing);
+    // Rates behind an estimate. Built up front: nothing here may touch `pricing` when the LiteLLM map is still loading.
+    const rates = rateLine(spend, pricing, kind === "primary");
     return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
                         const u = upstream;
                         // The deployment id proves which target answered; without a served record there is nothing to add.
@@ -305,7 +240,7 @@ function AgentTreeNode(props) {
                         if (!u && (!summary || summary.fallback))
                             return null;
                         return (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u?.upstream ?? summary?.name ?? (summary?.servedAlias || "deployment"), suffix] }));
-                    })(), _jsx(Show, { when: summary?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u26A0 litellm served ", summary?.name ?? summary?.servedAlias ?? "another deployment", servedID ? ` · ${servedID}` : "", summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""] }) }), _jsx(PastModels, { models: history.previous, llm: llm, sessionID: session.id, served: served }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["session total \u00B7 ", fmtTokens(tokens), " tok \u00B7 ", fmtSpend(spend)] }), _jsx(Show, { when: spend.estimated && kind === "primary" && pricing, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2248 litellm max price \u00B7 in ", fmtRate(pricing.input), "/M \u00B7 out ", fmtRate(pricing.output), "/M \u00B7 cache", " ", fmtRate(pricing.cacheRead), "/M"] }) })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, llm: llm, served: served }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, llm: llm }) })] })] }));
+                    })(), _jsx(Show, { when: summary?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u26A0 litellm served ", summary?.name ?? summary?.servedAlias ?? "another deployment", servedID ? ` · ${servedID}` : "", summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""] }) }), _jsx(PastModels, { models: history.previous, llm: llm, sessionID: session.id, served: served }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["session total \u00B7 ", fmtTokens(tokens), " tok \u00B7 ", fmtSpend(spend)] }), _jsx(Show, { when: rates, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: rates }) })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, llm: llm, served: served }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, llm: llm }) })] })] }));
 }
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool) {

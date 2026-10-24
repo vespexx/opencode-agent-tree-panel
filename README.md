@@ -59,7 +59,7 @@ cp dist/* ~/.config/opencode/plugins/agent-tree-panel/
 cat > ~/.config/opencode/plugins/agent-tree-panel/package.json <<'EOF'
 {
   "name": "opencode-agent-tree-panel",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -268,6 +268,8 @@ Limits worth knowing:
   token counts (per model, from the loaded transcript window). It is an upper bound: peak instead of off-peak, the most
   expensive speed variant, and long-context tiers treated as if they applied to every request. Models for which the
   proxy publishes no per-token price stay at `$0.00`, as do genuinely free ones.
+- The estimate needs `/model/info`, which arrives after the first render. Until then the panel shows the reported cost
+  (`$0.00`) and no rate line, then switches to `≈` on the next refresh — it never renders a price it does not have.
 
 ## How it works
 
@@ -284,7 +286,7 @@ Limits worth knowing:
 
 ```bash
 npm run dev    # TypeScript watch mode
-npm run check  # model-history + served-deployment + pricing checks (65 assertions)
+npm run check  # model-history + served-deployment + pricing + rendering helpers (85 assertions)
 ```
 
 ## Requirements
