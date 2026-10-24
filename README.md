@@ -7,6 +7,8 @@ Right-sidebar panel for OpenCode showing the agent/sub-agent tree with models, t
 - **Agents section**: Tree view of the current session family (root + sub-agent children) showing:
   - Agent name with kind badge (`· primary` / `· sub`)
   - Model (provider/model@variant)
+  - **Model history**: the model in effect now on top, the ones it replaced dimmed below (`↳ …`), newest first —
+    a quota/timeout fallback or a manual switch no longer hides which model answered the previous request
   - **Upstream model resolution** for LiteLLM aliases (e.g. `litellm/worker-coder-dev-model → openrouter/minimax/minimax-m3.1-flash`)
   - Total tokens used (input + output + reasoning + cache)
   - Cost
@@ -124,6 +126,10 @@ The panel appears in the right sidebar:
 │ Agents                                        7 total │
 │ ● build · primary                             14h 48m │
 │   litellm/deepseek-v4-flash-cloud-deepseek            │
+│   → deepseek/deepseek-v4-flash                        │
+│   ↓ 1.2M tok · $0.18 · 38m                            │
+│   ↳ litellm/deepseek-v4.1-flash-free ×7               │
+│   ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2           │
 │   33.1M tok · $0.00                                   │
 │ ● worker-verifier · sub                        2m 12s │
 │   litellm/worker-verifier-dev-model                   │
@@ -144,6 +150,38 @@ The panel appears in the right sidebar:
 │ ✓ subagent ×2                                  1m 12s │
 └───────────────────────────────────────────────────────┘
 ```
+
+## Model changes and fallbacks
+
+A session record only stores the model selected *at this moment*. The panel shows that model on top and keeps the ones
+it replaced underneath, so a fallback is visible instead of silently rewriting history:
+
+```
+build · primary                                  14h 48m
+  litellm/deepseek-v4-flash-cloud-deepseek
+  → deepseek/deepseek-v4-flash
+  ↓ 1.2M tok · $0.18 · 38m                   ← spent on the model below
+  ↳ litellm/deepseek-v4.1-flash-free ×7      ← served 7 requests before the fallback
+  ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2
+```
+
+Where the history comes from:
+
+- `model-switched` transcript entries (the harness writes one per change, with `previous`). Both a `session.switchModel`
+  fallback in the middle of a request and a model picked between requests produce one.
+- `model` of every assistant message, so the request count and the tokens/cost/time spent per model are real even when
+  the switch entry is older than the loaded transcript window.
+- `session.model.selected` events seen while the panel is open, which also covers sub-agent sessions (their transcripts
+  are not loaded by the panel at all).
+
+Limits worth knowing:
+
+- The client keeps roughly the last 20 messages per session, so on mount the panel can only show the switches still in
+  that window; everything it observes afterwards is remembered for the lifetime of the panel. Per-model tokens, cost and
+  time therefore cover the loaded window, while the last line under an agent is the session's real total.
+- A fallback *inside* one LiteLLM alias (LiteLLM router picking another deployment) is invisible here: the harness still
+  records the alias, not the deployment that answered. The `→ upstream` line is the statically resolved alias target.
+- At most 3 past models are listed; the rest collapse into `↳ +N earlier`.
 
 ## How it works
 
