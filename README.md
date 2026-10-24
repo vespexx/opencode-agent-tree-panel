@@ -120,29 +120,29 @@ If the fetch fails or the provider isn't LiteLLM, the panel silently shows only 
 The panel appears in the right sidebar:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│ Agents                                          7 total  │
-│ ● build · primary                              14h 48m   │
-│   litellm/deepseek-v4-flash-cloud-deepseek              │
-│   33.1M tok · $0.00                                       │
-│ ● worker-verifier · sub                         2m 12s   │
-│   litellm/worker-verifier-dev-model                     │
-│   → gemini/gemini-3.8-flash                             │
-│   160.2k tok · $0.00                                      │
-│ ○ worker-coder ×3                              11m 29s   │
-│   litellm/worker-coder-dev-model                        │
-│   → openrouter/minimax/minimax-m3.1-flash               │
-│   4.2M tok · $0.00                                        │
-│ ○ worker-ops ×8                                21m 40s   │
-│   litellm/worker-ops-dev-model                          │
-│   → openrouter/nvidia/nemotron-3-ultra-550b-a55b:free   │
-│   6.8M tok · $0.00                                        │
-├──────────────────────────────────────────────────────────┤
-│ Tools                                         3 in step  │
-│ ▶ shell                       running   4s               │
-│   {"command":"ls -la ..."}                              │
-│ ✓ subagent ×2                   1m 12s                 │
-└──────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│ Agents                                        7 total │
+│ ● build · primary                             14h 48m │
+│   litellm/deepseek-v4-flash-cloud-deepseek            │
+│   33.1M tok · $0.00                                   │
+│ ● worker-verifier · sub                        2m 12s │
+│   litellm/worker-verifier-dev-model                   │
+│   → gemini/gemini-3.8-flash                           │
+│   160.2k tok · $0.00                                  │
+│ ○ worker-coder ×3                             11m 29s │
+│   litellm/worker-coder-dev-model                      │
+│   → openrouter/minimax/minimax-m3.1-flash             │
+│   4.2M tok · $0.00                                    │
+│ ○ worker-ops ×8                               21m 40s │
+│   litellm/worker-ops-dev-model                        │
+│   → openrouter/nvidia/nemotron-3-ultra-550b-a55b:free │
+│   6.8M tok · $0.00                                    │
+├───────────────────────────────────────────────────────┤
+│ Tools                                       3 in step │
+│ ▶ shell  running                                   4s │
+│   {"command":"ls -la ..."}                            │
+│ ✓ subagent ×2                                  1m 12s │
+└───────────────────────────────────────────────────────┘
 ```
 
 ## How it works
