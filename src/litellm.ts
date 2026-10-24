@@ -15,6 +15,25 @@ export interface UpstreamModel {
   display?: string
 }
 
+/** One deployment (a single physical target) behind a LiteLLM alias. */
+export interface DeploymentModel {
+  /** `model_info.id` — the value LiteLLM returns as `x-litellm-model-id`. */
+  id: string
+  /** The alias (`model_name`) this deployment belongs to. */
+  alias: string
+  /** The upstream model (`litellm_params.model`). */
+  upstream: string
+  display?: string
+}
+
+/** Everything the panel needs from `/model/info`. */
+export interface LiteLLMData {
+  /** alias → upstream model. */
+  aliases: Map<string, UpstreamModel>
+  /** deployment id (lowercase) → deployment, so a served id can be named. */
+  deployments: Map<string, DeploymentModel>
+}
+
 /** Provider info shape we can get from ctx.data.location.provider.list(). */
 export interface ProviderInfoLike {
   id: string
@@ -24,7 +43,7 @@ export interface ProviderInfoLike {
 
 /** Cache entry for /model/info. */
 interface CacheEntry {
-  map: Map<string, UpstreamModel>
+  data: LiteLLMData
   fetchedAt: number
 }
 
@@ -139,7 +158,7 @@ async function fetchModelInfoRaw(
   extraHeaders: Record<string, string>,
   infoPath = "/model/info",
   timeout = 10000,
-): Promise<Map<string, UpstreamModel>> {
+): Promise<LiteLLMData> {
   const url = new URL(infoPath, baseURL)
   const data = await new Promise<{ status: number; data: string }>((resolve, reject) => {
     const req = http.request(
@@ -168,54 +187,82 @@ async function fetchModelInfoRaw(
     throw new Error(`LiteLLM /model/info returned ${data.status}: ${data.data.slice(0, 120)}`)
   }
 
-  let parsed: { data?: Array<{ model_name: string; litellm_params?: { model?: string }; model_info?: { display_name?: string } }> }
+  let parsed: {
+    data?: Array<{
+      model_name: string
+      litellm_params?: { model?: string }
+      model_info?: { id?: string; display_name?: string }
+    }>
+  }
   try {
     parsed = JSON.parse(data.data)
   } catch {
     throw new Error("Failed to parse LiteLLM /model/info JSON")
   }
 
-  const map = new Map<string, UpstreamModel>()
+  const aliases = new Map<string, UpstreamModel>()
+  const deployments = new Map<string, DeploymentModel>()
   for (const m of parsed.data ?? []) {
     const alias = m.model_name
     const upstream = m.litellm_params?.model
     const display = m.model_info?.display_name
-    if (alias && upstream) map.set(alias, { upstream, display })
+    if (!alias || !upstream) continue
+    aliases.set(alias, { upstream, display })
+    // model_info.id is exactly what LiteLLM echoes in x-litellm-model-id on the response.
+    const id = m.model_info?.id
+    if (id) deployments.set(id.toLowerCase(), { id, alias, upstream, display })
   }
-  return map
+  return { aliases, deployments }
 }
 
 /**
- * Get or build the alias → upstream map.
+ * Get or build the `/model/info` maps.
  * Cached for CACHE_TTL_MS. Concurrent calls deduplicate the fetch.
  */
-export async function getAliasMap(
+export async function getLiteLLMData(
   providerID: string,
   providersFromCache: ProviderInfoLike[],
-): Promise<Map<string, UpstreamModel>> {
+): Promise<LiteLLMData> {
   const now = Date.now()
-  if (cache && now - cache.fetchedAt < CACHE_TTL_MS) return cache.map
+  if (cache && now - cache.fetchedAt < CACHE_TTL_MS) return cache.data
 
   if (!inflight) {
     inflight = (async () => {
       const endpoint = discoverEndpoint(providerID, providersFromCache)
       if (!endpoint) throw new Error(`LiteLLM endpoint not found for provider ${providerID}`)
-      const map = await fetchModelInfoRaw(
+      const data = await fetchModelInfoRaw(
         endpoint.baseURL,
         endpoint.apiKey,
         endpoint.headers,
       )
-      cache = { map, fetchedAt: Date.now() }
+      cache = { data, fetchedAt: Date.now() }
       inflight = null
       return cache
     })()
   }
-  return inflight.then((c) => c.map)
+  return inflight.then((c) => c.data)
+}
+
+/** The alias → upstream map only (kept for callers that do not need deployment ids). */
+export async function getAliasMap(
+  providerID: string,
+  providersFromCache: ProviderInfoLike[],
+): Promise<Map<string, UpstreamModel>> {
+  return (await getLiteLLMData(providerID, providersFromCache)).aliases
 }
 
 /** Lookup a model alias, returning upstream model or undefined. */
 export function lookupAlias(map: Map<string, UpstreamModel>, alias: string): UpstreamModel | undefined {
   return map.get(alias)
+}
+
+/** Lookup the deployment behind an `x-litellm-model-id` value. */
+export function lookupDeployment(
+  map: Map<string, DeploymentModel>,
+  servedID: string | undefined,
+): DeploymentModel | undefined {
+  if (!servedID) return undefined
+  return map.get(servedID.toLowerCase())
 }
 
 /** Normalise a session model to its alias string if it looks like a LiteLLM alias. */
