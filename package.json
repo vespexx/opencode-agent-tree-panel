@@ -1,6 +1,6 @@
 {
   "name": "opencode-agent-tree-panel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Right-sidebar panel showing the agent/sub-agent tree with models, tokens, cost, and current step's tool calls",
   "type": "module",
   "exports": {
@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "check": "node scripts/check-models.mjs",
+    "check": "node scripts/check-models.mjs && node scripts/check-served.mjs",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {

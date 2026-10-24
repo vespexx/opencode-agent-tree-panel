@@ -3,10 +3,10 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { RGBA } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
 import {
-  getAliasMap,
+  getLiteLLMData,
   lookupAlias,
   extractAlias,
-  type UpstreamModel,
+  type LiteLLMData,
   type ProviderInfoLike,
 } from "./litellm"
 import {
@@ -19,6 +19,7 @@ import {
   type ModelValue,
   type TranscriptMessage,
 } from "./models"
+import { readServed, servedSummary, type ServedRecord } from "./served"
 
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -245,29 +246,48 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
   return { running, groups, finishedTotal: finished.length }
 }
 
-/** Past models of a session or group: what each one spent, then the model itself, dimmed under the current one. */
-function PastModels(props: { models: ModelUse[] }) {
+/**
+ * Past models of a session: what each one spent, then the model itself, dimmed under the current one.
+ *
+ * When LiteLLM reported that the request was answered by another deployment, the served model is named under the
+ * alias — that is the one case where the alias and the answer disagree.
+ */
+function PastModels(props: { models: ModelUse[]; llm: LiteLLMData; sessionID?: string; served?: ServedRecord[] }) {
   const ctx = usePlugin()
   const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS)
   const hidden = () => Math.max(0, props.models.length - shown().length)
+  const summaryOf = (use: ModelUse) =>
+    props.sessionID
+      ? servedSummary(props.served ?? [], props.sessionID, use.ref, extractAlias(use.ref), props.llm.deployments)
+      : undefined
 
   return (
     <>
       <For each={shown()}>
-        {(use) => (
-          <>
-            <Show when={use.tokens > 0 || use.cost > 0 || use.duration > 0}>
-              {/* Spent while this model was in charge; the arrow points at the model on the next line. */}
+        {(use) => {
+          const summary = () => summaryOf(use)
+          return (
+            <>
+              <Show when={use.tokens > 0 || use.cost > 0 || use.duration > 0}>
+                {/* Spent while this model was in charge; the arrow points at the model on the next line. */}
+                <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+                  ↓ {fmtTokens(use.tokens)} tok · {fmtCost(use.cost)} · {fmtDuration(use.duration)}
+                </text>
+              </Show>
               <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-                ↓ {fmtTokens(use.tokens)} tok · {fmtCost(use.cost)} · {fmtDuration(use.duration)}
+                ↳ {modelText(use.ref)}
+                {use.requests > 0 ? ` ×${use.requests}` : ""}
               </text>
-            </Show>
-            <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-              ↳ {modelText(use.ref)}
-              {use.requests > 0 ? ` ×${use.requests}` : ""}
-            </text>
-          </>
-        )}
+              <Show when={summary()?.fallback}>
+                <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+                  {"  → "}
+                  {summary()?.name ?? summary()?.servedAlias ?? "another deployment"}
+                  {" ⚠"}
+                </text>
+              </Show>
+            </>
+          )
+        }}
       </For>
       <Show when={hidden() > 0}>
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
@@ -279,14 +299,14 @@ function PastModels(props: { models: ModelUse[] }) {
 }
 
 /** Completed runs of one agent, rolled into a three-line block with totals. */
-function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, UpstreamModel> }) {
+function AgentGroupRow(props: { group: AgentGroup; llm: LiteLLMData }) {
   const ctx = usePlugin()
   const group = props.group
 
   // Resolve upstream model for LiteLLM aliases
   const current = group.models[0]
   const alias = current ? extractAlias(current.ref) : undefined
-  const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined
+  const upstream = alias ? lookupAlias(props.llm.aliases, alias) : undefined
 
   return (
     <box flexDirection="column" gap={0} marginLeft={2}>
@@ -314,9 +334,9 @@ function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, Upstrea
             </text>
           ) : null
         })()}
-        <PastModels models={group.models.slice(1)} />
+        <PastModels models={group.models.slice(1)} llm={props.llm} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
+          group total · {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
         </text>
       </box>
     </box>
@@ -324,8 +344,14 @@ function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, Upstrea
 }
 
 /** Agent tree section. */
-function AgentsSection(props: { sessionID: string; tick: number; aliasMap: Map<string, UpstreamModel> }) {
+function AgentsSection(props: { sessionID: string; tick: number; llm: LiteLLMData }) {
   const ctx = usePlugin()
+
+  // What LiteLLM actually served, read from the server hook's log (memoised on the file's size/mtime).
+  const served = createMemo(() => {
+    props.tick
+    return readServed()
+  })
 
   // Build the tree from family + cache
   const family = createMemo(() => {
@@ -360,7 +386,9 @@ function AgentsSection(props: { sessionID: string; tick: number; aliasMap: Map<s
         </text>
       </box>
 
-      <For each={roots()}>{(root) => <AgentTreeNode node={root} statuses={statuses()} aliasMap={props.aliasMap} />}</For>
+      <For each={roots()}>
+        {(root) => <AgentTreeNode node={root} statuses={statuses()} llm={props.llm} served={served()} />}
+      </For>
 
       <Show when={family().length === 0}>
         <text fg={ctx.theme.text.faint} selectable={false} marginTop={1}>
@@ -375,9 +403,10 @@ function AgentsSection(props: { sessionID: string; tick: number; aliasMap: Map<s
 function AgentTreeNode(props: {
   node: AgentNode
   statuses: Map<string, "idle" | "running">
-  aliasMap: Map<string, UpstreamModel>
+  llm: LiteLLMData
+  served: ServedRecord[]
 }) {
-  const { node, statuses, aliasMap } = props
+  const { node, statuses, llm, served } = props
   const ctx = usePlugin()
   const session = node.session
   const status = statuses.get(session.id) ?? "idle"
@@ -394,12 +423,15 @@ function AgentTreeNode(props: {
 
   // Resolve upstream model for LiteLLM aliases
   const alias = extractAlias(session.model)
-  const upstream = alias ? lookupAlias(aliasMap, alias) : undefined
+  const upstream = alias ? lookupAlias(llm.aliases, alias) : undefined
   // The session record only holds the model in effect now; earlier ones come from the transcript.
   const history = cachedModelHistory(
     session,
     (ctx.data.session.message.list(session.id) ?? []) as unknown as TranscriptMessage[],
   )
+  // What LiteLLM actually served for the model in effect (from the response headers, via the server hook).
+  const summary = servedSummary(served, session.id, history.current ?? session.model, alias, llm.deployments)
+  const servedID = summary?.servedID?.slice(0, 8)
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -432,25 +464,37 @@ function AgentTreeNode(props: {
         </text>
         {(() => {
           const u = upstream
-          return u ? (
+          // The deployment id proves which target answered; without a served record there is nothing to add.
+          const suffix = servedID && !summary?.fallback ? ` · ${servedID}` : ""
+          // A fallback without a known alias target is described by the warning line alone.
+          if (!u && (!summary || summary.fallback)) return null
+          return (
             <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-              → {u.upstream}
+              → {u?.upstream ?? summary?.name ?? (summary?.servedAlias || "deployment")}
+              {suffix}
             </text>
-          ) : null
+          )
         })()}
-        <PastModels models={history.previous} />
+        <Show when={summary?.fallback}>
+          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+            ⚠ litellm served {summary?.name ?? summary?.servedAlias ?? "another deployment"}
+            {servedID ? ` · ${servedID}` : ""}
+            {summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""}
+          </text>
+        </Show>
+        <PastModels models={history.previous} llm={llm} sessionID={session.id} served={served} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
+          session total · {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
         </text>
       </box>
 
       {/* Live sub-agents in full detail, finished ones rolled up per agent. */}
       <Show when={hasChildren}>
         <For each={children.running}>
-          {(child) => <AgentTreeNode node={child} statuses={statuses} aliasMap={aliasMap} />}
+          {(child) => <AgentTreeNode node={child} statuses={statuses} llm={llm} served={served} />}
         </For>
         <For each={children.groups}>
-          {(group) => <AgentGroupRow group={group} aliasMap={aliasMap} />}
+          {(group) => <AgentGroupRow group={group} llm={llm} />}
         </For>
       </Show>
     </box>
@@ -638,10 +682,10 @@ function Panel(props: { sessionID: string }) {
   const ctx = usePlugin()
   const [tick, setTick] = createSignal(0)
   const [failed, setFailed] = createSignal(false)
-  const [aliasMap, setAliasMap] = createSignal<Map<string, UpstreamModel>>(new Map())
+  const [llm, setLlm] = createSignal<LiteLLMData>({ aliases: new Map(), deployments: new Map() })
   const [aliasLoading, setAliasLoading] = createSignal(false)
 
-  // Load alias map on first mount
+  // Load alias + deployment maps on first mount
   createEffect(
     on(
       () => props.sessionID,
@@ -651,8 +695,7 @@ function Panel(props: { sessionID: string }) {
           // Sync providers to ensure cache is fresh
           await ctx.data.location.provider.sync()
           const providers = (ctx.data.location.provider.list() ?? []) as ProviderInfoLike[]
-          const map = await getAliasMap("litellm", providers)
-          setAliasMap(map)
+          setLlm(await getLiteLLMData("litellm", providers))
         } catch {
           // silently ignore — upstream display is optional
         } finally {
@@ -764,7 +807,7 @@ function Panel(props: { sessionID: string }) {
         </text>
       </Show>
 
-      <AgentsSection sessionID={props.sessionID} tick={tick()} aliasMap={aliasMap()} />
+      <AgentsSection sessionID={props.sessionID} tick={tick()} llm={llm()} />
       <ToolsSection sessionID={props.sessionID} tick={tick()} />
     </box>
   )
