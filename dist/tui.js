@@ -115,6 +115,48 @@ function elapsed(session, status) {
     const end = status === "running" ? session.time.updated : (session.time.idle ?? session.time.updated);
     return Math.max(0, end - session.time.created);
 }
+/** How many finished entries stay visible before they fold into a summary line. */
+const MAX_FINISHED_AGENTS = 3;
+const MAX_FINISHED_TOOLS = 3;
+/** Running entries first, then the most recently touched ones. */
+function sortByActivity(nodes, statuses) {
+    return [...nodes].sort((a, b) => {
+        const aRunning = statuses.get(a.session.id) === "running" ? 1 : 0;
+        const bRunning = statuses.get(b.session.id) === "running" ? 1 : 0;
+        if (aRunning !== bRunning)
+            return bRunning - aRunning;
+        return b.session.time.updated - a.session.time.updated;
+    });
+}
+/** Visible children plus a per-agent tally of the ones folded away. */
+function splitChildren(nodes, statuses) {
+    const sorted = sortByActivity(nodes, statuses);
+    const running = sorted.filter((n) => statuses.get(n.session.id) === "running");
+    const finished = sorted.filter((n) => statuses.get(n.session.id) !== "running");
+    const hidden = finished.slice(MAX_FINISHED_AGENTS);
+    const counts = new Map();
+    for (const node of hidden) {
+        const key = node.session.agent ?? "default";
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return {
+        visible: [...running, ...finished.slice(0, MAX_FINISHED_AGENTS)],
+        hiddenTotal: hidden.length,
+        hiddenCounts: counts,
+    };
+}
+/** "worker-coder ×4, worker-ops ×3" — biggest group first. */
+function tallyText(counts) {
+    return [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => `${name} ×${count}`)
+        .join(", ");
+}
+/** Folded-away finished entries rendered as one dim line. */
+function HiddenSummary(props) {
+    const ctx = usePlugin();
+    return (_jsxs("box", { flexDirection: "row", gap: 1, marginLeft: props.indent, paddingLeft: 2, children: [_jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["+", props.total] }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", flexShrink: 1, children: props.text })] }));
+}
 /** Agent tree section. */
 function AgentsSection(props) {
     const ctx = usePlugin();
@@ -135,7 +177,8 @@ function AgentsSection(props) {
         }
         return map;
     });
-    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: [family().length, " session", family().length !== 1 ? "s" : ""] })] }), _jsx(For, { each: family(), children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses() }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
+    const roots = createMemo(() => splitChildren(family(), statuses()));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [family().length, " total"] })] }), _jsx(For, { each: roots().visible, children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses() }) }), _jsx(Show, { when: roots().hiddenTotal > 0, children: _jsx(HiddenSummary, { total: roots().hiddenTotal, text: tallyText(roots().hiddenCounts), indent: 0 }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
 }
 /** Recursive tree node renderer. */
 function AgentTreeNode(props) {
@@ -147,9 +190,21 @@ function AgentTreeNode(props) {
     const tokens = totalTokens(session.tokens);
     const duration = elapsed(session, status);
     const hasChildren = node.children.length > 0;
+    const children = splitChildren(node.children, statuses);
     const agentName = session.agent ?? "default";
     const kind = session.parentID ? "sub" : "primary";
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: node.depth * 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(session.model) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsx(Show, { when: hasChildren, children: _jsx(For, { each: node.children, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses }) }) })] }));
+    // The root and whatever is running stay expanded; finished sub-agents fold to one line.
+    const compact = !running && node.depth > 0;
+    const indent = node.depth * 2;
+    const childrenBlock = (_jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.visible, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses }) }), _jsx(Show, { when: children.hiddenTotal > 0, children: _jsx(HiddenSummary, { total: children.hiddenTotal, text: tallyText(children.hiddenCounts), indent: 0 }) })] }));
+    if (compact) {
+        return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: false }), _jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, textAlign: "right", flexShrink: 0, children: fmtTokens(tokens) })] }), childrenBlock] }));
+    }
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(session.model) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), childrenBlock] }));
+}
+/** A tool is "running" while it streams input or executes. */
+function isToolRunning(tool) {
+    return tool.state.status === "running" || tool.state.status === "streaming";
 }
 /** Tools section showing current step's tool calls. */
 function ToolsSection(props) {
@@ -169,11 +224,32 @@ function ToolsSection(props) {
         }
         return [];
     });
-    const tools = latestTools();
-    if (tools.length === 0) {
+    // Running first, then the newest calls.
+    const ordered = createMemo(() => {
+        const sorted = [...latestTools()].sort((a, b) => {
+            const aRunning = isToolRunning(a) ? 1 : 0;
+            const bRunning = isToolRunning(b) ? 1 : 0;
+            if (aRunning !== bRunning)
+                return bRunning - aRunning;
+            return b.time.created - a.time.created;
+        });
+        const finished = sorted.filter((tool) => !isToolRunning(tool));
+        const hidden = finished.slice(MAX_FINISHED_TOOLS);
+        const counts = new Map();
+        for (const tool of hidden)
+            counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+        return {
+            visible: [...sorted.filter(isToolRunning), ...finished.slice(0, MAX_FINISHED_TOOLS)],
+            hiddenTotal: hidden.length,
+            hiddenCounts: counts,
+            total: sorted.length,
+        };
+    });
+    const tools = ordered();
+    if (tools.total === 0) {
         return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Tools" }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: "(current step)" })] }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No tool calls in the current step" })] }));
     }
-    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Tools" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, children: [tools.length, " call", tools.length !== 1 ? "s" : "", " in current step"] })] }), _jsx(For, { each: tools, children: (tool) => _jsx(ToolRow, { tool: tool }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Tools" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [tools.total, " in current step"] })] }), _jsx(For, { each: tools.visible, children: (tool) => _jsx(ToolRow, { tool: tool, compact: !isToolRunning(tool) }) }), _jsx(Show, { when: tools.hiddenTotal > 0, children: _jsx(HiddenSummary, { total: tools.hiddenTotal, text: tallyText(tools.hiddenCounts), indent: 0 }) })] }));
 }
 /** Single tool call row. */
 function ToolRow(props) {
@@ -202,7 +278,7 @@ function ToolRow(props) {
     const statusLabel = error ? "error" : running ? "running" : completed ? "done" : "pending";
     // Use a colored left border via a thin box
     const leftBorder = _jsx("box", { width: 1, backgroundColor: statusColor + "80", height: 1 });
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content?.[0]?.text?.slice(0, 120) ?? "error" }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 1, paddingLeft: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [leftBorder, _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, width: 1, children: running ? "▶" : completed ? "✓" : error ? "✗" : "○" }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: name }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: statusColor, selectable: false, attributes: ATTR_DIM, children: statusLabel }), _jsx("box", { width: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, width: 6, children: fmtDuration(duration) })] }), _jsx(Show, { when: !props.compact && state.input && Object.keys(state.input).length > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "char", children: [JSON.stringify(state.input).slice(0, 120), JSON.stringify(state.input).length > 120 ? "…" : ""] }) }), _jsx(Show, { when: error && state.content && state.content.length > 0, children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, attributes: ATTR_DIM, marginLeft: 2, wrapMode: "none", children: state.content?.[0]?.text?.slice(0, 120) ?? "error" }) })] }));
 }
 /** Main panel component. */
 function Panel(props) {

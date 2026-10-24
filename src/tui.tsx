@@ -170,6 +170,61 @@ function elapsed(session: SessionInfo, status: "idle" | "running"): number {
   return Math.max(0, end - session.time.created)
 }
 
+/** How many finished entries stay visible before they fold into a summary line. */
+const MAX_FINISHED_AGENTS = 3
+const MAX_FINISHED_TOOLS = 3
+
+/** Running entries first, then the most recently touched ones. */
+function sortByActivity(nodes: AgentNode[], statuses: Map<string, "idle" | "running">): AgentNode[] {
+  return [...nodes].sort((a, b) => {
+    const aRunning = statuses.get(a.session.id) === "running" ? 1 : 0
+    const bRunning = statuses.get(b.session.id) === "running" ? 1 : 0
+    if (aRunning !== bRunning) return bRunning - aRunning
+    return b.session.time.updated - a.session.time.updated
+  })
+}
+
+/** Visible children plus a per-agent tally of the ones folded away. */
+function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "running">) {
+  const sorted = sortByActivity(nodes, statuses)
+  const running = sorted.filter((n) => statuses.get(n.session.id) === "running")
+  const finished = sorted.filter((n) => statuses.get(n.session.id) !== "running")
+  const hidden = finished.slice(MAX_FINISHED_AGENTS)
+  const counts = new Map<string, number>()
+  for (const node of hidden) {
+    const key = node.session.agent ?? "default"
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return {
+    visible: [...running, ...finished.slice(0, MAX_FINISHED_AGENTS)],
+    hiddenTotal: hidden.length,
+    hiddenCounts: counts,
+  }
+}
+
+/** "worker-coder ×4, worker-ops ×3" — biggest group first. */
+function tallyText(counts: Map<string, number>): string {
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, count]) => `${name} ×${count}`)
+    .join(", ")
+}
+
+/** Folded-away finished entries rendered as one dim line. */
+function HiddenSummary(props: { total: number; text: string; indent: number }) {
+  const ctx = usePlugin()
+  return (
+    <box flexDirection="row" gap={1} marginLeft={props.indent} paddingLeft={2}>
+      <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+        +{props.total}
+      </text>
+      <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char" flexShrink={1}>
+        {props.text}
+      </text>
+    </box>
+  )
+}
+
 /** Agent tree section. */
 function AgentsSection(props: { sessionID: string; tick: number }) {
   const ctx = usePlugin()
@@ -193,6 +248,8 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
     return map
   })
 
+  const roots = createMemo(() => splitChildren(family(), statuses()))
+
   return (
     <box flexDirection="column" gap={1}>
       <box flexDirection="row" gap={1}>
@@ -200,14 +257,18 @@ function AgentsSection(props: { sessionID: string; tick: number }) {
           Agents
         </text>
         <box flexGrow={1} />
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM}>
-          {family().length} session{family().length !== 1 ? "s" : ""}
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+          {family().length} total
         </text>
       </box>
 
-      <For each={family()}>
+      <For each={roots().visible}>
         {(root) => <AgentTreeNode node={root} statuses={statuses()} />}
       </For>
+
+      <Show when={roots().hiddenTotal > 0}>
+        <HiddenSummary total={roots().hiddenTotal} text={tallyText(roots().hiddenCounts)} indent={0} />
+      </Show>
 
       <Show when={family().length === 0}>
         <text fg={ctx.theme.text.faint} selectable={false} marginTop={1}>
@@ -228,12 +289,46 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
   const tokens = totalTokens(session.tokens)
   const duration = elapsed(session, status)
   const hasChildren = node.children.length > 0
+  const children = splitChildren(node.children, statuses)
 
   const agentName = session.agent ?? "default"
   const kind = session.parentID ? "sub" : "primary"
+  // The root and whatever is running stay expanded; finished sub-agents fold to one line.
+  const compact = !running && node.depth > 0
+  const indent = node.depth * 2
+
+  const childrenBlock = (
+    <Show when={hasChildren}>
+      <For each={children.visible}>{(child) => <AgentTreeNode node={child} statuses={statuses} />}</For>
+      <Show when={children.hiddenTotal > 0}>
+        <HiddenSummary total={children.hiddenTotal} text={tallyText(children.hiddenCounts)} indent={0} />
+      </Show>
+    </Show>
+  )
+
+  if (compact) {
+    return (
+      <box flexDirection="column" gap={0} marginLeft={indent}>
+        <box flexDirection="row" gap={1} height={1}>
+          <StatusDot running={false} />
+          <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="none" truncate flexShrink={1}>
+            {agentName}
+          </text>
+          <box flexGrow={1} />
+          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+            {fmtDuration(duration)}
+          </text>
+          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} width={6} textAlign="right" flexShrink={0}>
+            {fmtTokens(tokens)}
+          </text>
+        </box>
+        {childrenBlock}
+      </box>
+    )
+  }
 
   return (
-    <box flexDirection="column" gap={0} marginLeft={node.depth * 2}>
+    <box flexDirection="column" gap={0} marginLeft={indent}>
       {/* Line 1: status + agent name + kind, duration on the right (never shrinks). */}
       <box flexDirection="row" gap={1} height={1}>
         <StatusDot running={running} />
@@ -266,13 +361,14 @@ function AgentTreeNode(props: { node: AgentNode; statuses: Map<string, "idle" | 
         </text>
       </box>
 
-      <Show when={hasChildren}>
-        <For each={node.children}>
-          {(child) => <AgentTreeNode node={child} statuses={statuses} />}
-        </For>
-      </Show>
+      {childrenBlock}
     </box>
   )
+}
+
+/** A tool is "running" while it streams input or executes. */
+function isToolRunning(tool: ToolPart): boolean {
+  return tool.state.status === "running" || tool.state.status === "streaming"
 }
 
 /** Tools section showing current step's tool calls. */
@@ -293,9 +389,29 @@ function ToolsSection(props: { sessionID: string; tick: number }) {
     return []
   })
 
-  const tools = latestTools()
+  // Running first, then the newest calls.
+  const ordered = createMemo(() => {
+    const sorted = [...latestTools()].sort((a, b) => {
+      const aRunning = isToolRunning(a) ? 1 : 0
+      const bRunning = isToolRunning(b) ? 1 : 0
+      if (aRunning !== bRunning) return bRunning - aRunning
+      return b.time.created - a.time.created
+    })
+    const finished = sorted.filter((tool) => !isToolRunning(tool))
+    const hidden = finished.slice(MAX_FINISHED_TOOLS)
+    const counts = new Map<string, number>()
+    for (const tool of hidden) counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1)
+    return {
+      visible: [...sorted.filter(isToolRunning), ...finished.slice(0, MAX_FINISHED_TOOLS)],
+      hiddenTotal: hidden.length,
+      hiddenCounts: counts,
+      total: sorted.length,
+    }
+  })
 
-  if (tools.length === 0) {
+  const tools = ordered()
+
+  if (tools.total === 0) {
     return (
       <box flexDirection="column" gap={1}>
         <box flexDirection="row" gap={1}>
@@ -321,20 +437,22 @@ function ToolsSection(props: { sessionID: string; tick: number }) {
           Tools
         </text>
         <box flexGrow={1} />
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM}>
-          {tools.length} call{tools.length !== 1 ? "s" : ""} in current step
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} flexShrink={0}>
+          {tools.total} in current step
         </text>
       </box>
 
-      <For each={tools}>
-        {(tool) => <ToolRow tool={tool} />}
-      </For>
+      <For each={tools.visible}>{(tool) => <ToolRow tool={tool} compact={!isToolRunning(tool)} />}</For>
+
+      <Show when={tools.hiddenTotal > 0}>
+        <HiddenSummary total={tools.hiddenTotal} text={tallyText(tools.hiddenCounts)} indent={0} />
+      </Show>
     </box>
   )
 }
 
 /** Single tool call row. */
-function ToolRow(props: { tool: ToolPart }) {
+function ToolRow(props: { tool: ToolPart; compact?: boolean }) {
   const { tool } = props
   const ctx = usePlugin()
   const { name, state, time } = tool
@@ -382,8 +500,8 @@ function ToolRow(props: { tool: ToolPart }) {
         </text>
       </box>
 
-      <Show when={state.input && Object.keys(state.input).length > 0}>
-        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="none">
+      <Show when={!props.compact && state.input && Object.keys(state.input).length > 0}>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="char">
           {JSON.stringify(state.input).slice(0, 120)}{JSON.stringify(state.input).length > 120 ? "…" : ""}
         </text>
       </Show>
