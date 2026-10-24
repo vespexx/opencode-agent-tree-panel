@@ -1,8 +1,9 @@
-import { jsx as _jsx, jsxs as _jsxs } from "@opentui/solid/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "@opentui/solid/jsx-runtime";
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { getAliasMap, lookupAlias, extractAlias, } from "./litellm";
+import { MAX_PREVIOUS_MODELS, cachedModelHistory, modelKey, modelText, recordModelSwitch, } from "./models";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
     "session.created",
@@ -56,15 +57,6 @@ function fmtDuration(ms) {
         return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
     const h = Math.floor(m / 60);
     return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
-}
-/** Model rendered as provider/model@variant, tolerant of string and object shapes. */
-function modelText(model) {
-    if (!model)
-        return "unknown model";
-    if (typeof model === "string")
-        return model;
-    const variant = model.variant && model.variant !== "default" ? `@${model.variant}` : "";
-    return `${model.providerID}/${model.id}${variant}`;
 }
 /** Status dot: filled while the session is running. */
 function StatusDot(props) {
@@ -135,38 +127,52 @@ function splitChildren(nodes, statuses) {
     for (const node of finished) {
         const session = node.session;
         const key = session.agent ?? "default";
-        const model = modelText(session.model);
         const bucket = buckets.get(key) ?? {
-            group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, modelRef: session.model, updated: 0 },
-            models: new Set(),
+            group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, models: [], updated: 0 },
+            models: new Map(),
         };
         bucket.group.count += 1;
         bucket.group.tokens += totalTokens(session.tokens);
         bucket.group.cost += session.cost;
         bucket.group.duration += elapsed(session, "idle");
         bucket.group.updated = Math.max(bucket.group.updated, session.time.updated);
-        bucket.models.add(model);
+        // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
+        const modelID = modelKey(session.model);
+        if (session.model && modelID) {
+            const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0 };
+            use.requests += 1;
+            use.lastUsed = Math.max(use.lastUsed, session.time.updated);
+            bucket.models.set(modelID, use);
+        }
         buckets.set(key, bucket);
     }
     const groups = [...buckets.values()]
         .map(({ group, models }) => ({
         ...group,
-        model: models.size === 1 ? [...models][0] : `${models.size} models`,
+        models: [...models.values()].sort((a, b) => b.lastUsed - a.lastUsed),
     }))
         .sort((a, b) => b.updated - a.updated);
     return { running, groups, finishedTotal: finished.length };
+}
+/** Past models of a session or group: dimmed under the current one, newest first. */
+function PastModels(props) {
+    const ctx = usePlugin();
+    const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS);
+    const hidden = () => Math.max(0, props.models.length - shown().length);
+    return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => (_jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] })) }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
 }
 /** Completed runs of one agent, rolled into a three-line block with totals. */
 function AgentGroupRow(props) {
     const ctx = usePlugin();
     const group = props.group;
     // Resolve upstream model for LiteLLM aliases
-    const alias = group.modelRef ? extractAlias(group.modelRef) : undefined;
+    const current = group.models[0];
+    const alias = current ? extractAlias(current.ref) : undefined;
     const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined;
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: group.model }), (() => {
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(current?.ref) }), (() => {
                         const u = upstream;
                         return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
-                    })(), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
+                    })(), _jsx(PastModels, { models: group.models.slice(1) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
 }
 /** Agent tree section. */
 function AgentsSection(props) {
@@ -209,10 +215,12 @@ function AgentTreeNode(props) {
     // Resolve upstream model for LiteLLM aliases
     const alias = extractAlias(session.model);
     const upstream = alias ? lookupAlias(aliasMap, alias) : undefined;
-    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(session.model) }), (() => {
+    // The session record only holds the model in effect now; earlier ones come from the transcript.
+    const history = cachedModelHistory(session, (ctx.data.session.message.list(session.id) ?? []));
+    return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
                         const u = upstream;
                         return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
-                    })(), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, aliasMap: aliasMap }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, aliasMap: aliasMap }) })] })] }));
+                    })(), _jsx(PastModels, { models: history.previous }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, aliasMap: aliasMap }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, aliasMap: aliasMap }) })] })] }));
 }
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool) {
@@ -374,8 +382,25 @@ function Panel(props) {
             setTick((v) => v + 1);
         }, TICK_THROTTLE_MS);
     };
+    /**
+     * Does the event belong to the panel's session family? Sub-agents report under their own sessionID, so a filter
+     * on the root alone would freeze every sub-agent row (model switches, steps, idle) until the root happens to move.
+     */
+    const inFamily = (data) => {
+        const id = data?.sessionID;
+        if (!id)
+            return false;
+        if (id === props.sessionID)
+            return true;
+        const family = ctx.data.session.family(props.sessionID);
+        if (family.includes(id))
+            return true;
+        // A brand-new sub-agent is not in the family yet when its first event arrives.
+        const parentID = data?.parentID;
+        return !!parentID && (parentID === props.sessionID || family.includes(parentID));
+    };
     const onSession = (type, handler) => ctx.data.on(type, (event) => {
-        if (event?.data?.sessionID === props.sessionID)
+        if (inFamily(event?.data))
             handler();
     });
     const subscriptions = SESSION_EVENTS.map((type) => {
@@ -384,6 +409,14 @@ function Panel(props) {
             : scheduleTick;
         return onSession(type, handler);
     });
+    // Keep the model history in memory: a switch may be the only trace of a fallback in a short transcript window.
+    const offModelSwitch = ctx.data.on("session.model.selected", (event) => {
+        const data = event?.data;
+        if (!inFamily(data) || !data?.sessionID || !data.model)
+            return;
+        recordModelSwitch(data.sessionID, data.model, data.previous, event.created ?? Date.now());
+    });
+    subscriptions.push(offModelSwitch);
     onCleanup(() => {
         for (const off of subscriptions)
             off();

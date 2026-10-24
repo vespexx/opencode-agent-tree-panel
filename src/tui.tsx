@@ -9,6 +9,16 @@ import {
   type UpstreamModel,
   type ProviderInfoLike,
 } from "./litellm"
+import {
+  MAX_PREVIOUS_MODELS,
+  cachedModelHistory,
+  modelKey,
+  modelText,
+  recordModelSwitch,
+  type ModelUse,
+  type ModelValue,
+  type TranscriptMessage,
+} from "./models"
 
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
@@ -36,7 +46,7 @@ interface SessionInfo {
   id: string
   parentID?: string
   agent?: string
-  model?: { id: string; providerID: string; variant?: string }
+  model?: ModelValue
   cost: number
   tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   outcome?: "succeeded" | "failed" | "interrupted"
@@ -63,14 +73,15 @@ interface ToolPart {
 interface AssistantMessage {
   type: "assistant"
   agent?: string
-  model?: { id: string; providerID: string; variant?: string }
+  model?: ModelValue
   content: Array<{ type: string } | ToolPart>
   time: { created: number; streamed?: number; completed?: number }
 }
 
-/** Event payload with sessionID. */
+/** Event payload with sessionID (and parentID on session.created). */
 interface SessionEventPayload {
-  data?: { sessionID?: string }
+  created?: number
+  data?: { sessionID?: string; parentID?: string; model?: ModelValue; previous?: ModelValue }
 }
 
 /** Text attribute bitmask constants (from @opentui/core). */
@@ -101,14 +112,6 @@ function fmtDuration(ms: number): string {
   if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
   const h = Math.floor(m / 60)
   return m % 60 ? `${h}h${m % 60}m` : `${h}h`
-}
-
-/** Model rendered as provider/model@variant, tolerant of string and object shapes. */
-function modelText(model?: { id: string; providerID: string; variant?: string } | string): string {
-  if (!model) return "unknown model"
-  if (typeof model === "string") return model
-  const variant = model.variant && model.variant !== "default" ? `@${model.variant}` : ""
-  return `${model.providerID}/${model.id}${variant}`
 }
 
 /** Status dot: filled while the session is running. */
@@ -194,8 +197,8 @@ interface AgentGroup {
   tokens: number
   cost: number
   duration: number
-  model: string
-  modelRef?: { id: string; providerID: string; variant?: string } | string
+  /** Distinct models the runs used, most recent first. */
+  models: ModelUse[]
   updated: number
 }
 
@@ -205,32 +208,63 @@ function splitChildren(nodes: AgentNode[], statuses: Map<string, "idle" | "runni
   const running = sorted.filter((n) => statuses.get(n.session.id) === "running")
   const finished = sorted.filter((n) => statuses.get(n.session.id) !== "running")
 
-  const buckets = new Map<string, { group: AgentGroup; models: Set<string> }>()
+  const buckets = new Map<string, { group: AgentGroup; models: Map<string, ModelUse> }>()
   for (const node of finished) {
     const session = node.session
     const key = session.agent ?? "default"
-    const model = modelText(session.model)
     const bucket = buckets.get(key) ?? {
-      group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, model, modelRef: session.model, updated: 0 },
-      models: new Set<string>(),
+      group: { agent: key, count: 0, tokens: 0, cost: 0, duration: 0, models: [], updated: 0 },
+      models: new Map<string, ModelUse>(),
     }
     bucket.group.count += 1
     bucket.group.tokens += totalTokens(session.tokens)
     bucket.group.cost += session.cost
     bucket.group.duration += elapsed(session, "idle")
     bucket.group.updated = Math.max(bucket.group.updated, session.time.updated)
-    bucket.models.add(model)
+    // Runs of the same agent may sit on different models (a fallback between runs): keep them all, newest first.
+    const modelID = modelKey(session.model)
+    if (session.model && modelID) {
+      const use = bucket.models.get(modelID) ?? { ref: session.model, requests: 0, lastUsed: 0 }
+      use.requests += 1
+      use.lastUsed = Math.max(use.lastUsed, session.time.updated)
+      bucket.models.set(modelID, use)
+    }
     buckets.set(key, bucket)
   }
 
   const groups = [...buckets.values()]
     .map(({ group, models }) => ({
       ...group,
-      model: models.size === 1 ? [...models][0]! : `${models.size} models`,
+      models: [...models.values()].sort((a, b) => b.lastUsed - a.lastUsed),
     }))
     .sort((a, b) => b.updated - a.updated)
 
   return { running, groups, finishedTotal: finished.length }
+}
+
+/** Past models of a session or group: dimmed under the current one, newest first. */
+function PastModels(props: { models: ModelUse[] }) {
+  const ctx = usePlugin()
+  const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS)
+  const hidden = () => Math.max(0, props.models.length - shown().length)
+
+  return (
+    <>
+      <For each={shown()}>
+        {(use) => (
+          <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+            ↳ {modelText(use.ref)}
+            {use.requests > 0 ? ` ×${use.requests}` : ""}
+          </text>
+        )}
+      </For>
+      <Show when={hidden() > 0}>
+        <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
+          ↳ +{hidden()} earlier
+        </text>
+      </Show>
+    </>
+  )
 }
 
 /** Completed runs of one agent, rolled into a three-line block with totals. */
@@ -239,7 +273,8 @@ function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, Upstrea
   const group = props.group
 
   // Resolve upstream model for LiteLLM aliases
-  const alias = group.modelRef ? extractAlias(group.modelRef) : undefined
+  const current = group.models[0]
+  const alias = current ? extractAlias(current.ref) : undefined
   const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined
 
   return (
@@ -258,7 +293,7 @@ function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, Upstrea
       </box>
       <box flexDirection="column" paddingLeft={2}>
         <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          {group.model}
+          {modelText(current?.ref)}
         </text>
         {(() => {
           const u = upstream
@@ -268,6 +303,7 @@ function AgentGroupRow(props: { group: AgentGroup; aliasMap: Map<string, Upstrea
             </text>
           ) : null
         })()}
+        <PastModels models={group.models.slice(1)} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {fmtTokens(group.tokens)} tok · {fmtCost(group.cost)}
         </text>
@@ -348,6 +384,11 @@ function AgentTreeNode(props: {
   // Resolve upstream model for LiteLLM aliases
   const alias = extractAlias(session.model)
   const upstream = alias ? lookupAlias(aliasMap, alias) : undefined
+  // The session record only holds the model in effect now; earlier ones come from the transcript.
+  const history = cachedModelHistory(
+    session,
+    (ctx.data.session.message.list(session.id) ?? []) as unknown as TranscriptMessage[],
+  )
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -373,10 +414,10 @@ function AgentTreeNode(props: {
         </text>
       </box>
 
-      {/* Line 2: the model wraps on its own line so long names stay readable. */}
+      {/* Line 2: the current model, then the ones it replaced, dimmed below. */}
       <box flexDirection="column" paddingLeft={2}>
         <text fg={ctx.theme.text.muted} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-          {modelText(session.model)}
+          {modelText(history.current ?? session.model)}
         </text>
         {(() => {
           const u = upstream
@@ -386,6 +427,7 @@ function AgentTreeNode(props: {
             </text>
           ) : null
         })()}
+        <PastModels models={history.previous} />
         <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
           {fmtTokens(tokens)} tok · {fmtCost(session.cost)}
         </text>
@@ -658,9 +700,24 @@ function Panel(props: { sessionID: string }) {
     }, TICK_THROTTLE_MS)
   }
 
+  /**
+   * Does the event belong to the panel's session family? Sub-agents report under their own sessionID, so a filter
+   * on the root alone would freeze every sub-agent row (model switches, steps, idle) until the root happens to move.
+   */
+  const inFamily = (data?: { sessionID?: string; parentID?: string }) => {
+    const id = data?.sessionID
+    if (!id) return false
+    if (id === props.sessionID) return true
+    const family = ctx.data.session.family(props.sessionID)
+    if (family.includes(id)) return true
+    // A brand-new sub-agent is not in the family yet when its first event arrives.
+    const parentID = data?.parentID
+    return !!parentID && (parentID === props.sessionID || family.includes(parentID))
+  }
+
   const onSession = (type: typeof SESSION_EVENTS[number], handler: () => void) =>
     ctx.data.on(type as any, (event: SessionEventPayload) => {
-      if (event?.data?.sessionID === props.sessionID) handler()
+      if (inFamily(event?.data)) handler()
     })
 
   const subscriptions = SESSION_EVENTS.map((type) => {
@@ -669,6 +726,14 @@ function Panel(props: { sessionID: string }) {
       : scheduleTick
     return onSession(type, handler)
   })
+
+  // Keep the model history in memory: a switch may be the only trace of a fallback in a short transcript window.
+  const offModelSwitch = ctx.data.on("session.model.selected" as any, (event: SessionEventPayload) => {
+    const data = event?.data
+    if (!inFamily(data) || !data?.sessionID || !data.model) return
+    recordModelSwitch(data.sessionID, data.model, data.previous, event.created ?? Date.now())
+  })
+  subscriptions.push(offModelSwitch)
 
   onCleanup(() => {
     for (const off of subscriptions) off()
