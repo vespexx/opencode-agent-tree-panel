@@ -123,9 +123,15 @@ function StatusBadge(props: { status: "idle" | "running"; variant?: "compact" })
 }
 
 /** Model display: provider/model. */
-function ModelLabel(props: { model?: { id: string; providerID: string; variant?: string } }) {
+function ModelLabel(props: { model?: { id: string; providerID: string; variant?: string } | string }) {
   const ctx = usePlugin()
   if (!props.model) return <text fg={ctx.theme.text.faint} selectable={false}>—</text>
+  
+  // Handle both object and string formats
+  if (typeof props.model === "string") {
+    return <text fg={ctx.theme.text.base} selectable={false} attributes={ATTR_DIM}>{props.model}</text>
+  }
+  
   const { providerID, id, variant } = props.model
   return (
     <text fg={ctx.theme.text.base} selectable={false} attributes={ATTR_DIM}>
@@ -401,7 +407,7 @@ function ToolRow(props: { tool: ToolPart }) {
 
       <Show when={error && state.content && state.content.length > 0}>
         <text fg={ctx.theme.text.feedback.error.base} selectable={false} attributes={ATTR_DIM} marginLeft={2} wrapMode="none">
-          {state.content![0]?.text?.slice(0, 120) ?? "error"}
+          {state.content?.[0]?.text?.slice(0, 120) ?? "error"}
         </text>
       </Show>
     </box>
