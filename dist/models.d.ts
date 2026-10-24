@@ -85,6 +85,8 @@ export declare function modelText(model?: ModelValue): string;
 export declare function modelKey(model?: ModelValue): string | undefined;
 /** Total tokens of a usage record (input + output + reasoning + cache). */
 export declare function usageTokens(tokens: TranscriptMessage["tokens"]): number;
+/** Add one token breakdown into another (in place). */
+export declare function mergeUsage(target: Usage, source: Usage): void;
 /** Rebuild a session's model history from its transcript. */
 export declare function readModelHistory(session: SessionLike, messages: TranscriptMessage[]): ModelHistory;
 /** Remember a `session.model.selected` event so the replaced model shows up under the current one. */

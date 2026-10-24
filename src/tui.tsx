@@ -3,19 +3,18 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { RGBA } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
 import {
-  estimateCost,
   getLiteLLMData,
   lookupAlias,
   lookupPricing,
   extractAlias,
   type LiteLLMData,
-  type ModelPricing,
   type ProviderInfoLike,
 } from "./litellm"
 import {
   MAX_PREVIOUS_MODELS,
   cachedModelHistory,
   emptyUsage,
+  mergeUsage,
   modelKey,
   modelText,
   recordModelSwitch,
@@ -23,8 +22,8 @@ import {
   type ModelUse,
   type ModelValue,
   type TranscriptMessage,
-  type Usage,
 } from "./models"
+import { fmtDuration, fmtSpend, fmtTokens, rateLine, spendOf, sumSpend } from "./format"
 import { readServed, servedSummary, type ServedRecord } from "./served"
 
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
@@ -96,77 +95,6 @@ const ATTR_BOLD = 1
 const ATTR_DIM = 2
 const ATTR_ITALIC = 3
 const ATTR_UNDERLINE = 4
-
-/** Display format helpers. */
-function fmtTokens(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0"
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`
-  return String(Math.round(value))
-}
-
-function fmtCost(value: number): string {
-  if (!Number.isFinite(value) || value === 0) return "$0.00"
-  if (value < 0.01) return `$${value.toFixed(4)}`
-  return `$${value.toFixed(2)}`
-}
-
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
-  const h = Math.floor(m / 60)
-  return m % 60 ? `${h}h${m % 60}m` : `${h}h`
-}
-
-/** A per-token rate as USD per million tokens, the unit prices are usually compared in. */
-function fmtRate(perToken: number): string {
-  const perMillion = perToken * 1_000_000
-  if (!Number.isFinite(perMillion) || perMillion <= 0) return "$0"
-  if (perMillion >= 0.1) return `$${perMillion.toFixed(2)}`
-  if (perMillion >= 0.001) return `$${perMillion.toFixed(3)}`
-  return `$${perMillion.toFixed(4)}`
-}
-
-/** Money shown for one model or session: the reported cost, or an estimate at LiteLLM prices. */
-interface Spend {
-  cost: number
-  /** True when the number was computed from published rates instead of reported by the harness. */
-  estimated: boolean
-}
-
-/**
- * Cost of some tokens, preferring the number OpenCode reported.
- *
- * OpenCode prices a model only when it knows the id (its model registry); a locally defined LiteLLM alias is unknown to
- * it, so every message of such a model comes back with `cost: 0` even though the proxy charges for it. In that case the
- * panel prices the tokens itself from `/model/info` — at the highest published rate, so the number is an upper bound.
- */
-function spendOf(reported: number, usage: Usage, pricing: ModelPricing | undefined): Spend {
-  if (reported > 0) return { cost: reported, estimated: false }
-  const estimate = estimateCost(pricing, usage)
-  return estimate && estimate > 0 ? { cost: estimate, estimated: true } : { cost: reported, estimated: false }
-}
-
-/** Sum of several spends; the total is an estimate when any part of it is. */
-function sumSpend(spends: Spend[]): Spend {
-  return { cost: spends.reduce((sum, spend) => sum + spend.cost, 0), estimated: spends.some((spend) => spend.estimated) }
-}
-
-function fmtSpend(spend: Spend): string {
-  return `${spend.estimated ? "≈ " : ""}${fmtCost(spend.cost)}`
-}
-
-/** Add one token breakdown into another (in place). */
-function mergeUsage(target: Usage, source: Usage): void {
-  target.input += source.input
-  target.output += source.output
-  target.reasoning += source.reasoning
-  target.cacheRead += source.cacheRead
-  target.cacheWrite += source.cacheWrite
-}
 
 /** Status dot: filled while the session is running. */
 function StatusDot(props: { running: boolean }) {
@@ -509,6 +437,8 @@ function AgentTreeNode(props: {
   // Prices of the deployment that answered (or of the alias), used when the harness itself reported no cost.
   const pricing = lookupPricing(llm, alias, summary?.servedID)
   const spend = spendOf(session.cost, usageOf(session.tokens), pricing)
+  // Rates behind an estimate. Built up front: nothing here may touch `pricing` when the LiteLLM map is still loading.
+  const rates = rateLine(spend, pricing, kind === "primary")
 
   return (
     <box flexDirection="column" gap={0} marginLeft={indent}>
@@ -564,10 +494,9 @@ function AgentTreeNode(props: {
           session total · {fmtTokens(tokens)} tok · {fmtSpend(spend)}
         </text>
         {/* The price behind an estimate, so a "$0.00 → ≈ $0.36" change explains itself. */}
-        <Show when={spend.estimated && kind === "primary" && pricing}>
+        <Show when={rates}>
           <text fg={ctx.theme.text.faint} selectable={false} attributes={ATTR_DIM} wrapMode="char">
-            ≈ litellm max price · in {fmtRate(pricing!.input)}/M · out {fmtRate(pricing!.output)}/M · cache{" "}
-            {fmtRate(pricing!.cacheRead)}/M
+            {rates}
           </text>
         </Show>
       </box>

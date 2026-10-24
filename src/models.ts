@@ -111,6 +111,15 @@ export function usageTokens(tokens: TranscriptMessage["tokens"]): number {
   return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
 }
 
+/** Add one token breakdown into another (in place). */
+export function mergeUsage(target: Usage, source: Usage): void {
+  target.input += source.input
+  target.output += source.output
+  target.reasoning += source.reasoning
+  target.cacheRead += source.cacheRead
+  target.cacheWrite += source.cacheWrite
+}
+
 /** Rebuild a session's model history from its transcript. */
 export function readModelHistory(session: SessionLike, messages: TranscriptMessage[]): ModelHistory {
   const uses = new Map<string, ModelUse>()

@@ -56,6 +56,14 @@ export function usageTokens(tokens) {
         return 0;
     return tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write;
 }
+/** Add one token breakdown into another (in place). */
+export function mergeUsage(target, source) {
+    target.input += source.input;
+    target.output += source.output;
+    target.reasoning += source.reasoning;
+    target.cacheRead += source.cacheRead;
+    target.cacheWrite += source.cacheWrite;
+}
 /** Rebuild a session's model history from its transcript. */
 export function readModelHistory(session, messages) {
     const uses = new Map();
