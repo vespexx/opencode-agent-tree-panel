@@ -177,6 +177,25 @@ try {
   check("the deployment from the captured headers is known to the live proxy", Boolean(hit), String(hit?.alias))
   const alias = data.aliases.get(ALIAS)
   check("the alias still resolves to its upstream", Boolean(alias?.upstream), String(alias?.upstream))
+
+  const { lookupPricing } = await import("../dist/litellm.js")
+  const live = data.pricing.get(DEPLOYMENT_ID.toLowerCase())
+  check(
+    "live /model/info prices the deployment that answered",
+    Boolean(live && live.input > 0 && live.output > 0),
+    JSON.stringify(live),
+  )
+  check("the deployment price is the peak price, not the off-peak one", live?.input === 3e-7, String(live?.input))
+  check("the alias is priced as well", Boolean(data.aliasPricing.get(ALIAS)), JSON.stringify(data.aliasPricing.get(ALIAS)))
+  check(
+    "lookupPricing uses the deployment that actually answered",
+    lookupPricing(data, ALIAS, DEPLOYMENT_ID)?.deployment === DEPLOYMENT_ID,
+    String(lookupPricing(data, ALIAS, DEPLOYMENT_ID)?.deployment),
+  )
+  check(
+    "lookupPricing falls back to the alias for an unknown deployment",
+    lookupPricing(data, ALIAS, "not-a-deployment")?.alias === ALIAS,
+  )
 } catch (error) {
   console.log(`(skipped live proxy checks: ${error.message})`)
 }
@@ -220,6 +239,88 @@ try {
   check("the live request did not fall back", record?.fallbacks === 0, String(record?.fallbacks))
 } catch (error) {
   console.log(`(skipped live request check: ${error.message})`)
+}
+
+// 8. Pricing: LiteLLM publishes per-token rates; the panel takes the highest of them.
+{
+  const { buildModelMaps, estimateCost, readPricing } = await import("../dist/litellm.js")
+
+  // The shape of model_info for deepseek-v4-flash-cloud-deepseek on the live proxy (peak + off-peak rates).
+  const deepseek = readPricing({
+    input_cost_per_token: 3e-7,
+    output_cost_per_token: 1.2e-6,
+    cache_read_input_token_cost: 6e-9,
+    cache_creation_input_token_cost: 0,
+    off_peak_pricing: {
+      input_cost_per_token: 1.5e-7,
+      output_cost_per_token: 6e-7,
+      cache_read_input_token_cost: 3e-9,
+    },
+  })
+  check(
+    "per-token prices are read from model_info",
+    deepseek?.input === 3e-7 && deepseek?.output === 1.2e-6 && deepseek?.cacheRead === 6e-9,
+    JSON.stringify(deepseek),
+  )
+  check("the off-peak rate does not lower the price used", deepseek?.input === 3e-7, String(deepseek?.input))
+
+  const variants = readPricing({
+    input_cost_per_token: 3e-7,
+    input_cost_per_token_priority: 5e-7,
+    input_cost_per_token_above_200k_tokens: 6e-7,
+    output_cost_per_token: 1e-6,
+    output_cost_per_reasoning_token: 2e-6,
+    cache_read_input_token_cost: 1e-9,
+    cache_read_input_token_cost_flex: 2e-9,
+  })
+  check(
+    "the highest variant and long-context tier win",
+    variants?.input === 6e-7 && variants?.output === 2e-6 && variants?.cacheRead === 2e-9,
+    JSON.stringify(variants),
+  )
+  check("an unpriced deployment has no prices", readPricing({ input_cost_per_token: null }) === undefined)
+  check("a deployment without model_info has no prices", readPricing(undefined) === undefined)
+  check("a zero input price is treated as unpriced", readPricing({ input_cost_per_token: 0 }) === undefined)
+
+  // The session from the screenshot: 225 requests on the alias, all of them reported with cost 0.
+  const usage = { input: 195530, output: 65727, reasoning: 53403, cacheRead: 26891776, cacheWrite: 0 }
+  const expected = 195530 * 3e-7 + (65727 + 53403) * 1.2e-6 + 26891776 * 6e-9
+  const estimate = estimateCost(deepseek, usage)
+  check("reasoning is billed at the output rate", Math.abs(estimate - expected) < 1e-12, `${estimate} vs ${expected}`)
+  check("the estimate is a plausible dollar amount", estimate > 0.3 && estimate < 0.4, String(estimate))
+  check("an unpriced model yields no estimate", estimateCost(undefined, usage) === undefined)
+
+  // An alias with several deployments: priced as a whole only when all of them agree.
+  const maps = buildModelMaps([
+    {
+      model_name: "same-price",
+      litellm_params: { model: "vendor/a" },
+      model_info: { id: "dep-1", input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+    },
+    {
+      model_name: "same-price",
+      litellm_params: { model: "vendor/a" },
+      model_info: { id: "dep-2", input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+    },
+    {
+      model_name: "mixed-price",
+      litellm_params: { model: "vendor/b" },
+      model_info: { id: "dep-3", input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+    },
+    {
+      model_name: "mixed-price",
+      litellm_params: { model: "vendor/b" },
+      model_info: { id: "dep-4", input_cost_per_token: 9e-6, output_cost_per_token: 9e-6 },
+    },
+    { model_name: "free-model", litellm_params: { model: "vendor/c" }, model_info: { id: "dep-5" } },
+  ])
+  check("an alias whose deployments agree is priced as a whole", Boolean(maps.aliasPricing.get("same-price")))
+  check(
+    "an alias with differing deployment prices is not priced blindly",
+    maps.aliasPricing.get("mixed-price") === undefined,
+  )
+  check("the differing deployment is still priced on its own", maps.pricing.get("dep-4")?.input === 9e-6)
+  check("an unpriced deployment gets no alias price", maps.aliasPricing.get("free-model") === undefined)
 }
 
 fs.rmSync(scratch, { recursive: true, force: true })

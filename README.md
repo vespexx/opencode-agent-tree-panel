@@ -15,7 +15,11 @@ Right-sidebar panel for OpenCode showing the agent/sub-agent tree with models, t
   - **Served deployment**: the deployment that actually answered, read from the LiteLLM response headers
     (`x-litellm-model-id`) and shown as a short id after the upstream model; when LiteLLM answered from another
     deployment the panel says so explicitly instead of showing the alias as if it had answered
-  - **Totals**: a `session total` line with tokens and cost (summing input + output + reasoning + cache)
+  - **Cost for models OpenCode cannot price**: when the harness reports `$0.00` for a LiteLLM alias (its registry does
+    not know the alias), the panel prices the tokens itself from `/model/info` and marks the number as an estimate
+    (`≈ $0.36`), so a paid model never looks free
+  - **Totals**: a `session total` line with tokens and cost (summing input + output + reasoning + cache); under the
+    primary session an estimated total also shows the rates it used
   - Elapsed duration
   - Live status indicator (● running / ○ idle)
 
@@ -55,7 +59,7 @@ cp dist/* ~/.config/opencode/plugins/agent-tree-panel/
 cat > ~/.config/opencode/plugins/agent-tree-panel/package.json <<'EOF'
 {
   "name": "opencode-agent-tree-panel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -121,7 +125,8 @@ Resolved upstream models appear as a dim line under the alias:
 worker-coder · sub                    2m 15s
   litellm/worker-coder-dev-model
   → openrouter/minimax/minimax-m3.1-flash · 75921bbf
-  session total · 1.2M tok · $0.04
+  session total · 1.2M tok · ≈ $0.04
+  ≈ litellm max price · in $0.30/M · out $1.20/M · cache $0.006/M
 ```
 
 If the fetch fails or the provider isn't LiteLLM, the panel silently shows only the alias — no errors, no clutter.
@@ -143,7 +148,8 @@ An alias can fan out to several deployments, and LiteLLM may answer from a diffe
 build · primary                                 14h 48m
   litellm/deepseek-v4-flash-cloud-deepseek
   → deepseek/deepseek-flash · 75921bbf
-  session total · 33.1M tok · $0.00
+  session total · 33.1M tok · ≈ $0.36
+  ≈ litellm max price · in $0.30/M · out $1.20/M · cache $0.006/M
 ```
 
 When LiteLLM answered from another deployment, the alias line stays and a warning line names what came back:
@@ -154,6 +160,36 @@ When LiteLLM answered from another deployment, the alias line stays and a warnin
 ```
 
 For a model that was already replaced, the same information is added under its `↳` line.
+
+### Why a paid model can show `$0.00`, and what the panel does about it
+
+OpenCode prices a request only when it knows the model id (its own model registry). A LiteLLM alias defined locally is
+not in that registry, so a paid model served through the alias comes back with `cost: 0` on every message — the session
+looks free although the proxy charged for it. (`x-litellm-model-id` does not help here: the response headers carry the
+deployment, not the price.)
+
+The panel therefore prices those tokens itself, from the same `/model/info`:
+
+- rates come from `model_info` (`input_cost_per_token`, `output_cost_per_token`, `cache_read_input_token_cost`,
+  `cache_creation_input_token_cost`); reasoning tokens are billed at the output rate, cache reads at the cache rate and
+  `tokens.input` is already the non-cached part, so nothing is counted twice;
+- LiteLLM can publish several rates per token — peak and off-peak (`off_peak_pricing`, DeepSeek's time-of-day billing),
+  speed variants (`_flex`, `_priority`, `_balanced`, `_ultrafast`), batch rates and long-context tiers
+  (`_above_200k_tokens`, …). A finished request does not say which one applied, so the panel takes the **maximum**: the
+  number is an upper bound and is shown with `≈`;
+- the prices of the deployment that answered are used when `served.jsonl` knows it, otherwise the alias's own prices;
+  an alias whose deployments disagree on price is never priced blindly (only its served deployment is);
+- when OpenCode did report a non-zero cost, that number wins and is printed without `≈`.
+
+For the session in the example above (`deepseek-v4-flash-cloud-deepseek`, peak rates $0.30/M in, $1.20/M out,
+$0.006/M cache read) 195.5k input + 119.1k output/reasoning + 26.9M cache-read tokens come to **≈ $0.36**; at the
+off-peak rate the same traffic would have cost about half. Under the primary session's `session total` the panel prints
+the rates it used, so the estimate explains itself:
+
+```
+session total · 33.1M tok · ≈ $0.36
+≈ litellm max price · in $0.30/M · out $1.20/M · cache $0.006/M
+```
 
 
 ## Screenshot
@@ -169,15 +205,16 @@ The panel appears in the right sidebar:
 │   ↓ 1.2M tok · $0.18 · 38m                            │
 │   ↳ litellm/deepseek-v4.1-flash-free ×7               │
 │   ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2           │
-│   session total · 33.1M tok · $0.00                   │
+│   session total · 33.1M tok · ≈ $0.36                  │
+│   ≈ litellm max price · in $0.30/M · out $1.20/M …     │
 │ ● worker-verifier · sub                        2m 12s │
 │   litellm/worker-verifier-dev-model                   │
 │   → gemini/gemini-3.8-flash                           │
-│   session total · 160.2k tok · $0.00                  │
+│   session total · 160.2k tok · $0.01                  │
 │ ○ worker-coder ×3                             11m 29s │
 │   litellm/worker-coder-dev-model                      │
 │   → openrouter/minimax/minimax-m3.1-flash             │
-│   group total · 4.2M tok · $0.00                      │
+│   group total · 4.2M tok · ≈ $1.31                    │
 │ ○ worker-ops ×8                               21m 40s │
 │   litellm/worker-ops-dev-model                        │
 │   → openrouter/nvidia/nemotron-3-ultra-550b-a55b:free │
@@ -202,7 +239,7 @@ build · primary                                  14h 48m
   ↓ 1.2M tok · $0.18 · 38m                    ← spent on the model below
   ↳ litellm/deepseek-v4.1-flash-free ×7       ← served 7 requests before the fallback
   ↳ litellm/qwen3.6-35b-a3b-win-lmstudio ×2
-  session total · 33.1M tok · $0.00
+  session total · 33.1M tok · ≈ $0.36         ← estimated: OpenCode reports 0 for this alias
 ```
 
 Where the history comes from:
@@ -227,6 +264,10 @@ Limits worth knowing:
 - Grouped finished sub-agents (`worker-coder ×3`) do not carry a served-deployment id: the record is per session and a
   group spans several of them, so the group row shows the statically resolved alias only.
 - At most 3 past models are listed; the rest collapse into `↳ +N earlier`.
+- An `≈` cost is an estimate at the highest rate LiteLLM publishes for that deployment, computed from the session's own
+  token counts (per model, from the loaded transcript window). It is an upper bound: peak instead of off-peak, the most
+  expensive speed variant, and long-context tiers treated as if they applied to every request. Models for which the
+  proxy publishes no per-token price stay at `$0.00`, as do genuinely free ones.
 
 ## How it works
 
@@ -235,7 +276,7 @@ Limits worth knowing:
 - Uses `ctx.data.session.get()` for per-session details
 - Uses `ctx.data.session.message.list()` to find current step's tool calls and the model history
 - Subscribes to session events (`session.created`, `session.execution.*`, `session.step.*`, `session.tool.*`, etc.) for live updates
-- LiteLLM resolution runs once on panel mount (cached for 5 minutes); the served-deployment log is re-read only when the file changes
+- LiteLLM resolution runs once on panel mount (cached for 5 minutes), and it carries the prices used for estimates; the served-deployment log is re-read only when the file changes
 - The server entry registers one `http.response` hook, scoped by provider id (`litellm`) inside the callback, and appends
   to the log; it never blocks or fails a request
 
@@ -243,7 +284,7 @@ Limits worth knowing:
 
 ```bash
 npm run dev    # TypeScript watch mode
-npm run check  # model-history + served-deployment checks (42 assertions)
+npm run check  # model-history + served-deployment + pricing checks (65 assertions)
 ```
 
 ## Requirements

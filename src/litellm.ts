@@ -26,12 +26,51 @@ export interface DeploymentModel {
   display?: string
 }
 
+/** Price of one token, in USD. */
+export interface TokenPricing {
+  input: number
+  /** Output tokens; reasoning tokens are billed at the same rate. */
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/** A deployment's published prices, with the alias they belong to. */
+export interface ModelPricing extends TokenPricing {
+  /** `model_info.id` of the deployment; absent when an alias has several deployments with these same prices. */
+  deployment?: string
+  /** The alias (`model_name`) these prices are published under. */
+  alias: string
+  /** Upstream model behind the deployment. */
+  upstream?: string
+}
+
+/** Token counts of one or more requests, split the way the harness counts them. */
+export interface TokenUsage {
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+}
+
 /** Everything the panel needs from `/model/info`. */
 export interface LiteLLMData {
   /** alias → upstream model. */
   aliases: Map<string, UpstreamModel>
   /** deployment id (lowercase) → deployment, so a served id can be named. */
   deployments: Map<string, DeploymentModel>
+  /** deployment id (lowercase) → published prices. */
+  pricing: Map<string, ModelPricing>
+  /** alias → prices, only when every deployment of that alias publishes the same rates. */
+  aliasPricing: Map<string, ModelPricing>
+}
+
+/** One row of `/model/info` — only the fields this module reads. */
+export interface ModelInfoRow {
+  model_name: string
+  litellm_params?: { model?: string }
+  model_info?: { id?: string; display_name?: string } & Record<string, unknown>
 }
 
 /** Provider info shape we can get from ctx.data.location.provider.list(). */
@@ -151,6 +190,115 @@ function parseJSONC(text: string): Record<string, unknown> {
   return JSON.parse(out)
 }
 
+/**
+ * Cost fields of `model_info` that are per-token prices, grouped by the kind of token they price.
+ *
+ * LiteLLM publishes more than one rate per token: peak and off-peak (`off_peak_pricing`, DeepSeek's time-of-day
+ * billing), speed variants (`_flex`, `_priority`, `_balanced`, `_ultrafast`), batch rates and long-context tiers
+ * (`_above_128k_tokens`, `_above_200k_tokens`, …). Every one of them is USD per token, so they all belong here.
+ */
+const PRICE_FAMILIES: Array<[keyof TokenPricing, RegExp]> = [
+  ["input", /^input_cost_per_token/i],
+  ["output", /^output_cost_per_token/i],
+  ["output", /^output_cost_per_reasoning_token/i],
+  ["cacheRead", /^cache_read_input_token_cost/i],
+  ["cacheWrite", /^cache_creation_input_token_cost/i],
+]
+
+/**
+ * The highest published per-token price of one deployment, or `undefined` when the proxy publishes none.
+ *
+ * Why the maximum: a completed request does not say which rate it was billed at (the response headers carry the
+ * deployment, not the price), and the panel shows a session that may span peak and off-peak hours. Taking the highest
+ * rate makes the number an upper bound — it can be too high, never too low. A deployment whose `input_cost_per_token`
+ * is absent or zero is treated as unpriced (free models included).
+ */
+export function readPricing(info: Record<string, unknown> | undefined): TokenPricing | undefined {
+  if (!info) return undefined
+  const rates: TokenPricing = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  const take = (key: string, value: unknown) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return
+    for (const [kind, pattern] of PRICE_FAMILIES) {
+      if (pattern.test(key) && value > rates[kind]) rates[kind] = value
+    }
+  }
+  for (const [key, value] of Object.entries(info)) {
+    // Off-peak rates are nested one level down; they are usually lower, but they are still candidates.
+    if (key === "off_peak_pricing" && value && typeof value === "object") {
+      for (const [nestedKey, nestedValue] of Object.entries(value as Record<string, unknown>)) take(nestedKey, nestedValue)
+      continue
+    }
+    take(key, value)
+  }
+  return rates.input > 0 ? rates : undefined
+}
+
+function sameRates(a: TokenPricing, b: TokenPricing): boolean {
+  return a.input === b.input && a.output === b.output && a.cacheRead === b.cacheRead && a.cacheWrite === b.cacheWrite
+}
+
+/** Build the alias, deployment and pricing maps from `/model/info` rows. */
+export function buildModelMaps(rows: ModelInfoRow[]): LiteLLMData {
+  const aliases = new Map<string, UpstreamModel>()
+  const deployments = new Map<string, DeploymentModel>()
+  const pricing = new Map<string, ModelPricing>()
+  const perAlias = new Map<string, ModelPricing[]>()
+
+  for (const m of rows) {
+    const alias = m.model_name
+    const upstream = m.litellm_params?.model
+    const display = m.model_info?.display_name
+    if (!alias || !upstream) continue
+    aliases.set(alias, { upstream, display })
+    // model_info.id is exactly what LiteLLM echoes in x-litellm-model-id on the response.
+    const id = m.model_info?.id
+    if (id) deployments.set(id.toLowerCase(), { id, alias, upstream, display })
+
+    const rates = readPricing(m.model_info as Record<string, unknown> | undefined)
+    if (!id || !rates) continue
+    const entry: ModelPricing = { ...rates, deployment: id, alias, upstream }
+    pricing.set(id.toLowerCase(), entry)
+    const group = perAlias.get(alias) ?? []
+    group.push(entry)
+    perAlias.set(alias, group)
+  }
+
+  // An alias is priced as a whole only when all its deployments agree; otherwise only the served deployment is priced.
+  const aliasPricing = new Map<string, ModelPricing>()
+  for (const [alias, entries] of perAlias) {
+    const first = entries[0]
+    if (!first) continue
+    if (entries.every((entry) => sameRates(entry, first))) {
+      aliasPricing.set(alias, { ...first, deployment: entries.length === 1 ? first.deployment : undefined })
+    }
+  }
+
+  return { aliases, deployments, pricing, aliasPricing }
+}
+
+/** Price the tokens of one request at these rates. `undefined` when the model publishes no prices. */
+export function estimateCost(pricing: TokenPricing | undefined, usage: TokenUsage): number | undefined {
+  if (!pricing) return undefined
+  return (
+    usage.input * pricing.input +
+    (usage.output + usage.reasoning) * pricing.output +
+    usage.cacheRead * pricing.cacheRead +
+    usage.cacheWrite * pricing.cacheWrite
+  )
+}
+
+/**
+ * Prices for a session's model: the deployment that actually answered wins, the alias is the fallback.
+ * The deployment matters when an alias fans out to several targets with different prices.
+ */
+export function lookupPricing(data: LiteLLMData, alias: string | undefined, servedID?: string): ModelPricing | undefined {
+  if (servedID) {
+    const served = data.pricing.get(servedID.toLowerCase())
+    if (served) return served
+  }
+  return alias ? data.aliasPricing.get(alias) : undefined
+}
+
 /** Fetch /model/info from LiteLLM using node:http (reliably sets Host header). */
 async function fetchModelInfoRaw(
   baseURL: string,
@@ -187,32 +335,14 @@ async function fetchModelInfoRaw(
     throw new Error(`LiteLLM /model/info returned ${data.status}: ${data.data.slice(0, 120)}`)
   }
 
-  let parsed: {
-    data?: Array<{
-      model_name: string
-      litellm_params?: { model?: string }
-      model_info?: { id?: string; display_name?: string }
-    }>
-  }
+  let parsed: { data?: ModelInfoRow[] }
   try {
     parsed = JSON.parse(data.data)
   } catch {
     throw new Error("Failed to parse LiteLLM /model/info JSON")
   }
 
-  const aliases = new Map<string, UpstreamModel>()
-  const deployments = new Map<string, DeploymentModel>()
-  for (const m of parsed.data ?? []) {
-    const alias = m.model_name
-    const upstream = m.litellm_params?.model
-    const display = m.model_info?.display_name
-    if (!alias || !upstream) continue
-    aliases.set(alias, { upstream, display })
-    // model_info.id is exactly what LiteLLM echoes in x-litellm-model-id on the response.
-    const id = m.model_info?.id
-    if (id) deployments.set(id.toLowerCase(), { id, alias, upstream, display })
-  }
-  return { aliases, deployments }
+  return buildModelMaps(parsed.data ?? [])
 }
 
 /**
