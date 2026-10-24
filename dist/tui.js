@@ -2,8 +2,9 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "@opentui/soli
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
-import { getAliasMap, lookupAlias, extractAlias, } from "./litellm";
+import { getLiteLLMData, lookupAlias, extractAlias, } from "./litellm";
 import { MAX_PREVIOUS_MODELS, cachedModelHistory, modelKey, modelText, recordModelSwitch, } from "./models";
+import { readServed, servedSummary } from "./served";
 /** Events that should trigger a panel refresh (from @opencode/protocol session events). */
 const SESSION_EVENTS = [
     "session.created",
@@ -157,12 +158,23 @@ function splitChildren(nodes, statuses) {
         .sort((a, b) => b.updated - a.updated);
     return { running, groups, finishedTotal: finished.length };
 }
-/** Past models of a session or group: what each one spent, then the model itself, dimmed under the current one. */
+/**
+ * Past models of a session: what each one spent, then the model itself, dimmed under the current one.
+ *
+ * When LiteLLM reported that the request was answered by another deployment, the served model is named under the
+ * alias — that is the one case where the alias and the answer disagree.
+ */
 function PastModels(props) {
     const ctx = usePlugin();
     const shown = () => props.models.slice(0, MAX_PREVIOUS_MODELS);
     const hidden = () => Math.max(0, props.models.length - shown().length);
-    return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => (_jsxs(_Fragment, { children: [_jsx(Show, { when: use.tokens > 0 || use.cost > 0 || use.duration > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2193 ", fmtTokens(use.tokens), " tok \u00B7 ", fmtCost(use.cost), " \u00B7 ", fmtDuration(use.duration)] }) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] })] })) }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
+    const summaryOf = (use) => props.sessionID
+        ? servedSummary(props.served ?? [], props.sessionID, use.ref, extractAlias(use.ref), props.llm.deployments)
+        : undefined;
+    return (_jsxs(_Fragment, { children: [_jsx(For, { each: shown(), children: (use) => {
+                    const summary = () => summaryOf(use);
+                    return (_jsxs(_Fragment, { children: [_jsx(Show, { when: use.tokens > 0 || use.cost > 0 || use.duration > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2193 ", fmtTokens(use.tokens), " tok \u00B7 ", fmtCost(use.cost), " \u00B7 ", fmtDuration(use.duration)] }) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 ", modelText(use.ref), use.requests > 0 ? ` ×${use.requests}` : ""] }), _jsx(Show, { when: summary()?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["  → ", summary()?.name ?? summary()?.servedAlias ?? "another deployment", " ⚠"] }) })] }));
+                } }), _jsx(Show, { when: hidden() > 0, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u21B3 +", hidden(), " earlier"] }) })] }));
 }
 /** Completed runs of one agent, rolled into a three-line block with totals. */
 function AgentGroupRow(props) {
@@ -171,15 +183,20 @@ function AgentGroupRow(props) {
     // Resolve upstream model for LiteLLM aliases
     const current = group.models[0];
     const alias = current ? extractAlias(current.ref) : undefined;
-    const upstream = alias ? lookupAlias(props.aliasMap, alias) : undefined;
+    const upstream = alias ? lookupAlias(props.llm.aliases, alias) : undefined;
     return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: 2, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: "\u25CB" }), _jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "none", truncate: true, flexShrink: 1, children: [group.agent, " \u00D7", group.count] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(group.duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(current?.ref) }), (() => {
                         const u = upstream;
                         return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
-                    })(), _jsx(PastModels, { models: group.models.slice(1) }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
+                    })(), _jsx(PastModels, { models: group.models.slice(1), llm: props.llm }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["group total \u00B7 ", fmtTokens(group.tokens), " tok \u00B7 ", fmtCost(group.cost)] })] })] }));
 }
 /** Agent tree section. */
 function AgentsSection(props) {
     const ctx = usePlugin();
+    // What LiteLLM actually served, read from the server hook's log (memoised on the file's size/mtime).
+    const served = createMemo(() => {
+        props.tick;
+        return readServed();
+    });
     // Build the tree from family + cache
     const family = createMemo(() => {
         props.tick; // react to tick for live updates
@@ -198,11 +215,11 @@ function AgentsSection(props) {
         return map;
     });
     const roots = createMemo(() => sortByActivity(family(), statuses()));
-    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [family().length, " total"] })] }), _jsx(For, { each: roots(), children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses(), aliasMap: props.aliasMap }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, children: [_jsxs("box", { flexDirection: "row", gap: 1, children: [_jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: ATTR_BOLD, children: "Agents" }), _jsx("box", { flexGrow: 1 }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: [family().length, " total"] })] }), _jsx(For, { each: roots(), children: (root) => _jsx(AgentTreeNode, { node: root, statuses: statuses(), llm: props.llm, served: served() }) }), _jsx(Show, { when: family().length === 0, children: _jsx("text", { fg: ctx.theme.text.faint, selectable: false, marginTop: 1, children: "No sessions in this family" }) })] }));
 }
 /** Recursive tree node renderer. */
 function AgentTreeNode(props) {
-    const { node, statuses, aliasMap } = props;
+    const { node, statuses, llm, served } = props;
     const ctx = usePlugin();
     const session = node.session;
     const status = statuses.get(session.id) ?? "idle";
@@ -217,13 +234,21 @@ function AgentTreeNode(props) {
     const indent = node.depth > 0 ? 2 : 0;
     // Resolve upstream model for LiteLLM aliases
     const alias = extractAlias(session.model);
-    const upstream = alias ? lookupAlias(aliasMap, alias) : undefined;
+    const upstream = alias ? lookupAlias(llm.aliases, alias) : undefined;
     // The session record only holds the model in effect now; earlier ones come from the transcript.
     const history = cachedModelHistory(session, (ctx.data.session.message.list(session.id) ?? []));
+    // What LiteLLM actually served for the model in effect (from the response headers, via the server hook).
+    const summary = servedSummary(served, session.id, history.current ?? session.model, alias, llm.deployments);
+    const servedID = summary?.servedID?.slice(0, 8);
     return (_jsxs("box", { flexDirection: "column", gap: 0, marginLeft: indent, children: [_jsxs("box", { flexDirection: "row", gap: 1, height: 1, children: [_jsx(StatusDot, { running: running }), _jsx("text", { fg: ctx.theme.text.base, selectable: false, attributes: node.depth === 0 ? ATTR_BOLD : 0, wrapMode: "none", truncate: true, flexShrink: 1, children: agentName }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: ["\u00B7 ", kind] }), _jsx("box", { flexGrow: 1 }), _jsx("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, flexShrink: 0, children: fmtDuration(duration) })] }), _jsxs("box", { flexDirection: "column", paddingLeft: 2, children: [_jsx("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: modelText(history.current ?? session.model) }), (() => {
                         const u = upstream;
-                        return u ? (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u.upstream] })) : null;
-                    })(), _jsx(PastModels, { models: history.previous }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: [fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, aliasMap: aliasMap }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, aliasMap: aliasMap }) })] })] }));
+                        // The deployment id proves which target answered; without a served record there is nothing to add.
+                        const suffix = servedID && !summary?.fallback ? ` · ${servedID}` : "";
+                        // A fallback without a known alias target is described by the warning line alone.
+                        if (!u && (!summary || summary.fallback))
+                            return null;
+                        return (_jsxs("text", { fg: ctx.theme.text.muted, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u2192 ", u?.upstream ?? summary?.name ?? (summary?.servedAlias || "deployment"), suffix] }));
+                    })(), _jsx(Show, { when: summary?.fallback, children: _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["\u26A0 litellm served ", summary?.name ?? summary?.servedAlias ?? "another deployment", servedID ? ` · ${servedID}` : "", summary?.fallbacks ? ` · fallback ×${summary.fallbacks}` : ""] }) }), _jsx(PastModels, { models: history.previous, llm: llm, sessionID: session.id, served: served }), _jsxs("text", { fg: ctx.theme.text.faint, selectable: false, attributes: ATTR_DIM, wrapMode: "char", children: ["session total \u00B7 ", fmtTokens(tokens), " tok \u00B7 ", fmtCost(session.cost)] })] }), _jsxs(Show, { when: hasChildren, children: [_jsx(For, { each: children.running, children: (child) => _jsx(AgentTreeNode, { node: child, statuses: statuses, llm: llm, served: served }) }), _jsx(For, { each: children.groups, children: (group) => _jsx(AgentGroupRow, { group: group, llm: llm }) })] })] }));
 }
 /** A tool is "running" while it streams input or executes. */
 function isToolRunning(tool) {
@@ -321,17 +346,16 @@ function Panel(props) {
     const ctx = usePlugin();
     const [tick, setTick] = createSignal(0);
     const [failed, setFailed] = createSignal(false);
-    const [aliasMap, setAliasMap] = createSignal(new Map());
+    const [llm, setLlm] = createSignal({ aliases: new Map(), deployments: new Map() });
     const [aliasLoading, setAliasLoading] = createSignal(false);
-    // Load alias map on first mount
+    // Load alias + deployment maps on first mount
     createEffect(on(() => props.sessionID, async () => {
         setAliasLoading(true);
         try {
             // Sync providers to ensure cache is fresh
             await ctx.data.location.provider.sync();
             const providers = (ctx.data.location.provider.list() ?? []);
-            const map = await getAliasMap("litellm", providers);
-            setAliasMap(map);
+            setLlm(await getLiteLLMData("litellm", providers));
         }
         catch {
             // silently ignore — upstream display is optional
@@ -431,7 +455,7 @@ function Panel(props) {
     onMount(() => {
         void ctx.data.session.sync(props.sessionID);
     });
-    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick(), aliasMap: aliasMap() }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
+    return (_jsxs("box", { flexDirection: "column", gap: 1, padding: 1, children: [_jsx(Show, { when: failed(), children: _jsx("text", { fg: ctx.theme.text.feedback.error.base, selectable: false, children: "Failed to load session data" }) }), _jsx(AgentsSection, { sessionID: props.sessionID, tick: tick(), llm: llm() }), _jsx(ToolsSection, { sessionID: props.sessionID, tick: tick() })] }));
 }
 /** Plugin definition. */
 export default Plugin.define({
